@@ -1,0 +1,162 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing annotated semantic-version tag to release
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Validate tag input
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            printf 'Expected a stable semantic-version tag such as v0.1.0, got %q\n' "$RELEASE_TAG"
+            exit 1
+          fi
+
+      - name: Check out release tag
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+
+      - name: Verify existing annotated tag
+        id: tag
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          git show-ref --verify --quiet "refs/tags/$RELEASE_TAG" || {
+            printf 'Tag %s does not exist in the repository\n' "$RELEASE_TAG"
+            exit 1
+          }
+          if [[ "$(git cat-file -t "refs/tags/$RELEASE_TAG")" != tag ]]; then
+            printf 'Tag %s is not annotated\n' "$RELEASE_TAG"
+            exit 1
+          fi
+          git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null
+
+          tag_sha=$(git rev-list -n 1 "$RELEASE_TAG")
+          printf 'sha=%s\n' "$tag_sha" >>"$GITHUB_OUTPUT"
+          printf 'version=%s\n' "${RELEASE_TAG#v}" >>"$GITHUB_OUTPUT"
+
+      - name: Require successful CI for tagged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_SHA: ${{ steps.tag.outputs.sha }}
+        run: |
+          ci_success=$(gh run list \
+            --repo "$GITHUB_REPOSITORY" \
+            --workflow ci.yml \
+            --commit "$TAG_SHA" \
+            --event push \
+            --status completed \
+            --limit 100 \
+            --json conclusion \
+            --jq 'map(select(.conclusion == "success")) | length > 0')
+          if [[ "$ci_success" != true ]]; then
+            printf 'No successful CI run exists for commit %s\n' "$TAG_SHA"
+            exit 1
+          fi
+
+      - name: Ensure release does not exist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            printf 'Release %s already exists\n' "$RELEASE_TAG"
+            exit 1
+          fi
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify dependencies
+        run: go mod verify
+
+      - name: Build production binary
+        run: make build
+
+      - name: Verify production binary
+        env:
+          TAG_SHA: ${{ steps.tag.outputs.sha }}
+        run: |
+          artifact=$(file bin/topolab)
+          build_info=$(go version -m bin/topolab)
+          printf '%s\n' "$artifact"
+          printf '%s\n' "$build_info"
+          grep -F 'ELF 64-bit LSB executable, x86-64' <<<"$artifact"
+          grep -F 'statically linked' <<<"$artifact"
+          grep -F 'stripped' <<<"$artifact"
+          grep -F 'CGO_ENABLED=0' <<<"$build_info"
+          grep -F 'GOARCH=amd64' <<<"$build_info"
+          grep -F 'GOOS=linux' <<<"$build_info"
+          grep -F -- '-trimpath=true' <<<"$build_info"
+          grep -F "vcs.revision=$TAG_SHA" <<<"$build_info"
+          grep -F 'vcs.modified=false' <<<"$build_info"
+
+      - name: Package release
+        id: package
+        env:
+          TAG_SHA: ${{ steps.tag.outputs.sha }}
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          package="topolab_${VERSION}_linux_amd64"
+          mkdir -p "dist/$package"
+          install -m 0755 bin/topolab "dist/$package/topolab"
+          install -m 0644 README.md LICENSE "dist/$package/"
+
+          source_date_epoch=$(git show -s --format=%ct "$TAG_SHA")
+          tar --sort=name \
+            --mtime="@$source_date_epoch" \
+            --owner=0 \
+            --group=0 \
+            --numeric-owner \
+            -C dist \
+            -cf - "$package" | gzip -n >"dist/$package.tar.gz"
+          (
+            cd dist
+            sha256sum "$package.tar.gz" >checksums.txt
+          )
+
+          tar -tzf "dist/$package.tar.gz"
+          (
+            cd dist
+            sha256sum --check checksums.txt
+          )
+          printf 'archive=%s\n' "dist/$package.tar.gz" >>"$GITHUB_OUTPUT"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            "$ARCHIVE" \
+            dist/checksums.txt \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "$RELEASE_TAG" \
+            --generate-notes \
+            --latest
