@@ -13,8 +13,27 @@ import (
 )
 
 type StartedProcess struct {
-	PID int
-	Cmd *exec.Cmd
+	PID        int
+	Cmd        *exec.Cmd
+	stderrPath string
+}
+
+// StartupStderr returns stderr captured while a detached process starts.
+// Callers should call DiscardStartupStderr once startup succeeds.
+func (p *StartedProcess) StartupStderr() string {
+	if p == nil || p.stderrPath == "" {
+		return ""
+	}
+	data, _ := os.ReadFile(p.stderrPath)
+	return strings.TrimSpace(string(data))
+}
+
+func (p *StartedProcess) DiscardStartupStderr() {
+	if p == nil || p.stderrPath == "" {
+		return
+	}
+	_ = os.Remove(p.stderrPath)
+	p.stderrPath = ""
 }
 
 // Start launches QEMU without a shell. args must include argv[0].
@@ -24,15 +43,22 @@ func Start(args []string, extraFiles []*os.File) (*StartedProcess, error) {
 	}
 	cmd := exec.Command(args[0], args[1:]...)
 	cmd.ExtraFiles = extraFiles
+	stderr, err := os.CreateTemp("", "topolab-process-stderr-*")
+	if err != nil {
+		return nil, fmt.Errorf("create process stderr capture: %w", err)
+	}
 	// Keep the long-lived guest detached from the invoking CLI's standard
 	// streams. In particular, inheriting a pipe-backed stderr would keep that
 	// pipe open after topolab exits and make non-interactive callers hang.
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, stderr
 	if err := cmd.Start(); err != nil {
+		_ = stderr.Close()
+		_ = os.Remove(stderr.Name())
 		return nil, err
 	}
+	_ = stderr.Close()
 	go func() { _ = cmd.Wait() }()
-	return &StartedProcess{PID: cmd.Process.Pid, Cmd: cmd}, nil
+	return &StartedProcess{PID: cmd.Process.Pid, Cmd: cmd, stderrPath: stderr.Name()}, nil
 }
 
 type ProcessOps interface {

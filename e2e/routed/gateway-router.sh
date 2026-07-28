@@ -35,7 +35,6 @@ ensure_chain() {
         iptables -w -t "$table" -N "$chain"
     fi
     iptables -w -t "$table" -F "$chain"
-    # A targetless comment rule is an ownership marker and continues traversal.
     iptables -w -t "$table" -A "$chain" -m comment --comment "$OWNER_COMMENT"
 }
 
@@ -58,7 +57,5 @@ iptables -w -A "$FORWARD_CHAIN" -i "$TRANSIT_INTERFACE" -o "$SERVICE_INTERFACE" 
 
 ensure_chain nat "$NAT_CHAIN"
 ensure_jump nat POSTROUTING "$NAT_CHAIN"
-# Keep a dedicated, observable exemption ahead of masquerading. Its counter
-# proves that application replies traversed the explicitly untranslated path.
 iptables -w -t nat -A "$NAT_CHAIN" -s "$SERVICE_CIDR" -d "$CLIENT_CIDR" -o "$TRANSIT_INTERFACE" -m comment --comment topolab-routed-example-no-nat -j RETURN
 iptables -w -t nat -A "$NAT_CHAIN" -s "$SERVICE_CIDR" ! -d "$CLIENT_CIDR" -o "$TRANSIT_INTERFACE" -j MASQUERADE

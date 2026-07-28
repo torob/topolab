@@ -1,0 +1,100 @@
+name: services
+
+templates:
+  ubuntu-26.04: "${TOPOLAB_TEMPLATE:?set TOPOLAB_TEMPLATE to an Ubuntu 26.04 amd64 cloud image}"
+
+management_host:
+  interfaces:
+    admin:
+      ipv4:
+        addresses: [10.50.10.254/24]
+
+vms:
+  application:
+    template: ubuntu-26.04
+    ssh_authorized_keys:
+      - "${TOPOLAB_SSH_PUBLIC_KEY:?set TOPOLAB_SSH_PUBLIC_KEY to an OpenSSH public key}"
+    interfaces:
+      trunk:
+        vlans:
+          10:
+            ipv4: {dhcp: true}
+          20:
+            ipv4: {dhcp: true}
+  database:
+    template: ubuntu-26.04
+    ssh_authorized_keys:
+      - "${TOPOLAB_SSH_PUBLIC_KEY:?set TOPOLAB_SSH_PUBLIC_KEY to an OpenSSH public key}"
+    interfaces:
+      trunk:
+        vlans:
+          20:
+            ipv4: {dhcp: true}
+
+routers:
+  services:
+    interfaces:
+      trunk:
+        vlans:
+          10:
+            ipv4:
+              addresses: [10.50.10.1/24]
+              dhcp_server:
+                range_start: 10.50.10.100
+                range_end: 10.50.10.149
+                dns_servers: [1.1.1.1]
+          20:
+            ipv4:
+              addresses: [10.50.20.1/24]
+              dhcp_server:
+                range_start: 10.50.20.100
+                range_end: 10.50.20.149
+                dns_servers: [1.1.1.1]
+      uplink:
+        ipv4:
+          addresses: [198.18.0.2/30]
+        nat:
+          sources: [10.50.10.0/24, 10.50.20.0/24]
+    routes:
+      - {to: default, via: 198.18.0.1, interface: uplink}
+  edge:
+    interfaces:
+      inside:
+        ipv4:
+          addresses: [198.18.0.1/30]
+      external:
+        external:
+          sources: [198.18.0.0/30]
+          egress_interface: auto
+          source_ip: auto
+
+switches:
+  service-switch:
+    vlan_filtering: true
+  uplink-switch: {}
+
+links:
+  application-service:
+    endpoints:
+      - {node: application, interface: trunk}
+      - {node: service-switch, interface: application, port: {mode: trunk, allowed_vlans: [10, 20]}}
+  database-service:
+    endpoints:
+      - {node: database, interface: trunk}
+      - {node: service-switch, interface: database, port: {mode: trunk, allowed_vlans: [20]}}
+  router-service:
+    endpoints:
+      - {node: services, interface: trunk}
+      - {node: service-switch, interface: router, port: {mode: trunk, allowed_vlans: [10, 20]}}
+  management-service:
+    endpoints:
+      - {node: management_host, interface: admin}
+      - {node: service-switch, interface: management, port: {mode: access, vlan: 10}}
+  services-uplink:
+    endpoints:
+      - {node: services, interface: uplink}
+      - {node: uplink-switch, interface: services}
+  edge-uplink:
+    endpoints:
+      - {node: edge, interface: inside}
+      - {node: uplink-switch, interface: edge}

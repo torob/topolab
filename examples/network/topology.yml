@@ -1,0 +1,47 @@
+name: network
+
+management_host:
+  interfaces:
+    management:
+      ipv4:
+        addresses: [192.0.2.254/24]
+
+routers:
+  left:
+    interfaces:
+      trunk:
+        vlans:
+          10:
+            ipv4:
+              addresses: [192.0.2.1/24]
+  right:
+    interfaces:
+      access:
+        ipv4:
+          addresses: [192.0.2.2/24]
+
+switches:
+  lan:
+    vlan_filtering: true
+
+links:
+  left-lan:
+    endpoints:
+      - node: left
+        interface: trunk
+        egress:
+          latency_ms: 20
+          jitter_ms: 2
+          loss_percent: 1
+          rate_mbps: 100
+      - node: lan
+        interface: left
+        port: {mode: trunk, allowed_vlans: [10]}
+  right-lan:
+    endpoints:
+      - {node: right, interface: access}
+      - {node: lan, interface: right, port: {mode: access, vlan: 10}}
+  management-lan:
+    endpoints:
+      - {node: management_host, interface: management}
+      - {node: lan, interface: management, port: {mode: access, vlan: 10}}

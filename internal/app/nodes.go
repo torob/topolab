@@ -298,7 +298,7 @@ func (a *App) startNode(ctx context.Context, cfg *config.Config, layout state.La
 		} else if !same {
 			return fmt.Errorf("QEMU PID %d is not in fabric namespace %s", n.PID, netState.FabricNamespace)
 		}
-		if err := a.waitNodeReady(ctx, name, n); err != nil {
+		if err := a.waitNodeReady(ctx, name, n, nil); err != nil {
 			return err
 		}
 		if n.BalloonTargetMB != nil {
@@ -334,6 +334,7 @@ func (a *App) startNode(ctx context.Context, cfg *config.Config, layout state.La
 	if err != nil {
 		return fmt.Errorf("start QEMU node %s: %w", name, err)
 	}
+	defer started.DiscardStartupStderr()
 	n.PID = started.PID
 	n.NetworkNamespace = netState.FabricNamespace
 	n.Process = &state.Process{PID: started.PID, StartedAt: a.Now().UTC(), Executable: argv[0], IdentityArg: "topolab:" + cfg.Name + ":" + name}
@@ -344,7 +345,7 @@ func (a *App) startNode(ctx context.Context, cfg *config.Config, layout state.La
 		}
 		return fmt.Errorf("checkpoint QEMU node %s: %w", name, err)
 	}
-	if err := a.waitNodeReady(ctx, name, n); err != nil {
+	if err := a.waitNodeReady(ctx, name, n, started); err != nil {
 		return err
 	}
 	if n.BalloonTargetMB != nil {
@@ -398,6 +399,7 @@ func (a *App) startCollector(name, topology string, n *state.Node, checkpoint fu
 	if err != nil {
 		return fmt.Errorf("start serial collector for %s: %w", name, err)
 	}
+	defer started.DiscardStartupStderr()
 	n.CollectorProcess = &state.Process{PID: started.PID, StartedAt: a.Now().UTC(), Executable: exe, IdentityArg: n.SerialSocketPath}
 	if err := checkpoint(); err != nil {
 		stopErr := stopHelper(a.Processes, n.CollectorProcess)
@@ -417,14 +419,20 @@ func (a *App) startCollector(name, topology string, n *state.Node, checkpoint fu
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	if stderr := started.StartupStderr(); stderr != "" {
+		return fmt.Errorf("serial collector for %s did not create its socket: %s", name, stderr)
+	}
 	return fmt.Errorf("serial collector for %s did not create its socket", name)
 }
 
-func (a *App) waitNodeReady(ctx context.Context, name string, n *state.Node) error {
+func (a *App) waitNodeReady(ctx context.Context, name string, n *state.Node, started *qemu.StartedProcess) error {
 	deadline := time.Now().Add(10 * time.Second)
 	var lastErr error
 	for time.Now().Before(deadline) {
 		if !a.Processes.Alive(n.PID) {
+			if stderr := started.StartupStderr(); stderr != "" {
+				return fmt.Errorf("QEMU node %s exited before QMP became ready: %s", name, stderr)
+			}
 			return fmt.Errorf("QEMU node %s exited before QMP became ready", name)
 		}
 		attempt, cancel := context.WithTimeout(ctx, 250*time.Millisecond)

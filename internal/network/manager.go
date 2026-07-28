@@ -272,6 +272,14 @@ func (m *Manager) apply(ctx context.Context, p *Plan, checkpoint func(*State) er
 		if err := m.ensureNamespace(ctx, ns, alias); err != nil {
 			return state, err
 		}
+		if logical == "management_host" {
+			// Network namespaces inherit the host's forwarding setting when they
+			// are created. The management host is always an endpoint, never a
+			// transit router, so converge it to the safe value explicitly.
+			if _, err := m.run.Run(ctx, "ip", "netns", "exec", ns, "sysctl", "-q", "-w", "net.ipv4.ip_forward=0"); err != nil {
+				return state, err
+			}
+		}
 		if checkpoint != nil {
 			if err := checkpoint(state); err != nil {
 				return state, err

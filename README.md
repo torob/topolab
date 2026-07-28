@@ -84,26 +84,49 @@ Run the local checks with:
 go test ./...
 go test -race ./...
 go vet ./...
+python3 -m py_compile e2e/common.py e2e/*/test.py
+sh -n e2e/routed/gateway-router.sh
 ```
 
-Root-only network coverage is opt-in with `sudo make integration`. The full
-synthetic QEMU/Internet workflow is `sudo make integration-routed`; it requires
-the built Ubuntu image and the environment described below. Both harnesses use
-temporary working directories, assert cleanup/ownership behavior, and retain
-routed-lab captures when successful.
+Full E2E execution is deliberately direct and opt-in because it requires root,
+KVM, QEMU/OVMF, host networking tools, OpenSSH, and (for VM suites) Internet
+access. Build TopoLab, then run one suite:
 
-## Routed example
+```sh
+sudo python3 e2e/network/test.py
+sudo python3 e2e/routed/test.py
+sudo python3 e2e/services/test.py
+sudo python3 e2e/vm-features/test.py
+```
 
-[`examples/routed/topology.yml`](examples/routed/topology.yml) is a deliberately
-synthetic three-segment lab built from RFC 5737 documentation networks. An
-application VM reaches a client segment and the Internet through a dual-homed
-gateway VM and an external edge router. `gateway` is a normal VM, not a TopoLab
-router. Run its explicit, idempotent post-`up` provisioner to enable guest
-forwarding and its dedicated iptables chains. See
-[`examples/routed/README.md`](examples/routed/README.md).
+The VM suites automatically download the official Ubuntu 26.04 amd64 cloud
+image from pinned release `20260720`, verify its SHA-256, and cache it under
+`${XDG_CACHE_HOME:-$HOME/.cache}/topolab-e2e/`, never in the checkout. Set
+`TOPOLAB_TEMPLATE` to use another compatible image, `TOPOLAB_BINARY` to select
+the executable, or `TOPOLAB_E2E_KEEP=1` to retain a successful temporary run.
+Every failure retains its temporary directory and prints the location with
+diagnostics. The suites generate and export their own ephemeral SSH key.
 
-The opt-in Ubuntu 26.04 image build is documented in
-[`hack/template/README.md`](hack/template/README.md).
+## Examples
+
+Each example directory contains only a declarative `topology.yml` and its
+hand-maintained `topology.svg` diagram. Testing and guest provisioning live in
+the matching `e2e/` directory.
+
+- [`network`](examples/network/topology.yml) is router-only and demonstrates an
+  isolated management host, VLAN access/trunk ports, link impairment, capture,
+  and directional counters.
+- [`routed`](examples/routed/topology.yml) is the synthetic three-VM gateway and
+  external-router lab. The gateway is an ordinary VM; its idempotent guest
+  routing policy belongs to the routed E2E harness.
+- [`services`](examples/services/topology.yml) demonstrates tagged VM
+  interfaces, router VLANs, DHCP/DNS, router-local NAT, and external access.
+- [`vm-features`](examples/vm-features/topology.yml) demonstrates ballooning,
+  the guest-agent channel, serial logs, multiqueue and non-VirtIO NICs,
+  additional disks, boot policy, and selected VM lifecycle operations.
+
+CI syntax-checks the Python and shell assets and normalizes all four examples
+with placeholders. It intentionally does not run privileged root/KVM E2E.
 
 ## License
 

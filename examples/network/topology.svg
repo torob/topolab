@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="430" viewBox="0 0 960 430" role="img" aria-labelledby="title desc">
+  <title id="title">TopoLab network example</title>
+  <desc id="desc">An isolated management host and two namespace routers communicate through VLAN 10 on a VLAN-aware switch. The left link has traffic impairment, capture, and counters.</desc>
+  <defs><style>.bg{fill:#f8fafc}.node{fill:#fff;stroke:#334155;stroke-width:2}.router{fill:#e0f2fe}.switch{fill:#dcfce7}.host{fill:#fef3c7}.link{stroke:#475569;stroke-width:4;fill:none}.tag{fill:#7c3aed;font:14px sans-serif}.label{fill:#0f172a;font:bold 17px sans-serif}.small{fill:#334155;font:13px sans-serif}.legend{fill:#fff;stroke:#cbd5e1}</style></defs>
+  <rect class="bg" width="960" height="430"/>
+  <path class="link" d="M200 210H405M555 210H760M480 280V340"/>
+  <rect class="node router" x="40" y="155" width="160" height="110" rx="16"/><text class="label" x="120" y="195" text-anchor="middle">left</text><text class="small" x="120" y="220" text-anchor="middle">namespace router</text><text class="small" x="120" y="242" text-anchor="middle">192.0.2.1/24</text>
+  <rect class="node switch" x="405" y="155" width="150" height="110" rx="12"/><text class="label" x="480" y="200" text-anchor="middle">lan</text><text class="small" x="480" y="225" text-anchor="middle">VLAN switch</text>
+  <rect class="node router" x="760" y="155" width="160" height="110" rx="16"/><text class="label" x="840" y="195" text-anchor="middle">right</text><text class="small" x="840" y="220" text-anchor="middle">namespace router</text><text class="small" x="840" y="242" text-anchor="middle">192.0.2.2/24</text>
+  <rect class="node host" x="380" y="340" width="200" height="70" rx="14"/><text class="label" x="480" y="370" text-anchor="middle">management_host</text><text class="small" x="480" y="393" text-anchor="middle">192.0.2.254/24 · isolated NS</text>
+  <text class="tag" x="275" y="192" text-anchor="middle">trunk VLAN 10</text><text class="small" x="275" y="236" text-anchor="middle">20 ms ±2 · 1% loss · 100 Mb/s</text><text class="small" x="275" y="256" text-anchor="middle">capture + directional counters</text><text class="tag" x="655" y="192" text-anchor="middle">access VLAN 10</text><text class="tag" x="500" y="315">access VLAN 10</text>
+  <rect class="legend" x="24" y="20" width="330" height="72" rx="8"/><text class="label" x="40" y="48">Legend</text><text class="small" x="40" y="73">blue: router · green: switch · amber: management host</text>
+</svg>

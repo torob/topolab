@@ -119,6 +119,7 @@ func TestApplyBuildsShimsVLANImpairmentAndIsolation(t *testing.T) {
 	for _, fragment := range []string{
 		"type bridge",
 		"type veth peer name",
+		"ip netns exec " + state.ManagementHostNamespace + " sysctl -q -w net.ipv4.ip_forward=0",
 		"tc qdisc replace",
 		"htb rate 100mbit",
 		"handle 10: netem loss 1% limit 4294967295",

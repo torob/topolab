@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="500" viewBox="0 0 1000 500" role="img" aria-labelledby="title desc">
+<title id="title">TopoLab VM features example</title>
+<desc id="desc">Two Ubuntu VMs demonstrate lifecycle selection and VM hardware features including ballooning, guest agent, multiqueue VirtIO, an e1000e NIC, disks, boot options, and serial logs.</desc>
+<defs>
+<style>.bg{fill:#f8fafc}.vm{fill:#e0f2fe;stroke:#334155;stroke-width:2}.switch{fill:#dcfce7;stroke:#334155;stroke-width:2}.host{fill:#fef3c7;stroke:#334155;stroke-width:2}.disk{fill:#ede9fe;stroke:#6d28d9}.link{stroke:#475569;stroke-width:4}.label{font:bold 17px sans-serif;fill:#0f172a}.small{font:13px sans-serif;fill:#334155}.feature{font:12px sans-serif;fill:#1e3a8a}</style>
+</defs>
+<rect class="bg" width="1000" height="500"/>
+<path class="link" d="M240 250H410M590 250H760M500 310V390M835 310V390"/>
+<rect class="vm" x="40" y="115" width="200" height="260" rx="16"/>
+<text class="label" x="140" y="150" text-anchor="middle">feature-rich VM</text>
+<text class="feature" x="140" y="180" text-anchor="middle">4 vCPU · 4 GiB</text>
+<text class="feature" x="140" y="205" text-anchor="middle">balloon → 3 GiB</text>
+<text class="feature" x="140" y="230" text-anchor="middle">QEMU guest agent</text>
+<text class="feature" x="140" y="255" text-anchor="middle">VirtIO ×4 queues</text>
+<text class="feature" x="140" y="280" text-anchor="middle">e1000e NIC</text>
+<text class="feature" x="140" y="305" text-anchor="middle">SCSI · VirtIO · NVMe disks</text>
+<text class="feature" x="140" y="330" text-anchor="middle">strict disk/network boot</text>
+<text class="feature" x="140" y="355" text-anchor="middle">serial logs</text>
+<rect class="switch" x="410" y="200" width="180" height="110" rx="12"/>
+<text class="label" x="500" y="240" text-anchor="middle">management-net</text>
+<text class="small" x="500" y="268" text-anchor="middle">192.0.2.0/24</text>
+<text class="small" x="500" y="290" text-anchor="middle">capture + counters</text>
+<rect class="vm" x="760" y="155" width="150" height="155" rx="16"/>
+<text class="label" x="835" y="195" text-anchor="middle">lifecycle VM</text>
+<text class="feature" x="835" y="225" text-anchor="middle">select/all</text>
+<text class="feature" x="835" y="250" text-anchor="middle">stop · start</text>
+<text class="feature" x="835" y="275" text-anchor="middle">restart</text>
+<rect class="host" x="390" y="390" width="220" height="80" rx="14"/>
+<text class="label" x="500" y="423" text-anchor="middle">management_host</text>
+<text class="small" x="500" y="447" text-anchor="middle">192.0.2.254 · isolated NS</text>
+<rect class="switch" x="750" y="390" width="170" height="80" rx="12"/>
+<text class="label" x="835" y="423" text-anchor="middle">isolated-net</text>
+<text class="small" x="835" y="447" text-anchor="middle">e1000e link only</text>
+<rect class="disk" x="265" y="75" width="105" height="52" rx="8"/>
+<text class="small" x="318" y="98" text-anchor="middle">writable</text>
+<text class="small" x="318" y="116" text-anchor="middle">disks</text>
+<rect x="610" y="25" width="360" height="30" rx="6" fill="#fff" stroke="#cbd5e1"/>
+<text class="small" x="625" y="45">Legend: blue VM · green switch · amber management host · violet disk</text>
+</svg>

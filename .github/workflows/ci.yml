@@ -45,11 +45,25 @@ jobs:
       - name: Build
         run: go build -o "$RUNNER_TEMP/topolab" ./cmd/topolab
 
+      - name: Check Python syntax
+        run: python3 -m py_compile $(find e2e -type f -name '*.py' -print)
+
       - name: Check shell syntax
-        run: find examples hack -type f -name '*.sh' -exec sh -n {} +
+        run: find e2e -type f -name '*.sh' -exec sh -n {} +
 
       - name: Run ShellCheck
-        run: find examples hack -type f -name '*.sh' -print0 | xargs -0 shellcheck --severity=warning --shell=sh
+        run: find e2e -type f -name '*.sh' -print0 | xargs -0 shellcheck --severity=warning --shell=sh
+
+      - name: Normalize example configurations
+        run: |
+          ssh-keygen -q -t ed25519 -N '' -f "$RUNNER_TEMP/example-key"
+          python3 -c 'import struct,sys; open(sys.argv[1], "wb").write(struct.pack(">4sIQQ", b"QFI\xfb", 3, 0, 0))' "$RUNNER_TEMP/placeholder.qcow2"
+          export TOPOLAB_TEMPLATE="$RUNNER_TEMP/placeholder.qcow2"
+          export TOPOLAB_SSH_PUBLIC_KEY="$(cat "$RUNNER_TEMP/example-key.pub")"
+          for topology in examples/*/topology.yml; do
+            "$RUNNER_TEMP/topolab" --file "$topology" \
+              --working-dir "$RUNNER_TEMP/config" config >/dev/null
+          done
 
       - name: Install govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@v1.5.0

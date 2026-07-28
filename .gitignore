@@ -7,3 +7,8 @@
 *.pcapng
 *.qcow2
 *.iso
+*.img
+*.py[cod]
+__pycache__/
+.venv/
+ubuntu-*-server-cloudimg-*

@@ -1,6 +1,6 @@
 GO ?= go
 
-.PHONY: all build test test-race vet fmt check integration integration-routed
+.PHONY: all build test test-race vet fmt check
 
 all: check build
 
@@ -16,12 +16,6 @@ test-race:
 
 vet:
 	$(GO) vet ./...
-
-integration: build
-	TOPOLAB_BINARY=$(CURDIR)/bin/topolab ./hack/integration-network.sh
-
-integration-routed: build
-	TOPOLAB_BINARY=$(CURDIR)/bin/topolab ./hack/acceptance-routed.sh
 
 fmt:
 	gofmt -w $$(find cmd internal -name '*.go' -type f)

@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="520" viewBox="0 0 1080 520" role="img" aria-labelledby="title desc">
+<title id="title">TopoLab services example</title>
+<desc id="desc">Two tagged Ubuntu VMs and an isolated management host attach to a VLAN switch. A services router provides VLAN gateways, DHCP, DNS, and local NAT toward an edge router and the Internet.</desc>
+<defs>
+<style>.bg{fill:#f8fafc}.vm{fill:#e0f2fe;stroke:#334155;stroke-width:2}.router{fill:#ede9fe;stroke:#334155;stroke-width:2}.switch{fill:#dcfce7;stroke:#334155;stroke-width:2}.host{fill:#fef3c7;stroke:#334155;stroke-width:2}.cloud{fill:#fee2e2;stroke:#991b1b;stroke-width:2}.link{stroke:#475569;stroke-width:4}.label{font:bold 16px sans-serif;fill:#0f172a}.small{font:12px sans-serif;fill:#334155}.vlan{font:bold 13px sans-serif;fill:#7c3aed}</style>
+</defs>
+<rect class="bg" width="1080" height="520"/>
+<path class="link" d="M210 130H385M210 310H385M460 190V245M535 310H650M800 310H900M975 250V170"/>
+<rect class="vm" x="40" y="75" width="170" height="110" rx="14"/>
+<text class="label" x="125" y="112" text-anchor="middle">application VM</text>
+<text class="small" x="125" y="137" text-anchor="middle">tagged VLANs 10 + 20</text>
+<text class="small" x="125" y="158" text-anchor="middle">DHCP + DNS</text>
+<rect class="vm" x="40" y="255" width="170" height="110" rx="14"/>
+<text class="label" x="125" y="292" text-anchor="middle">database VM</text>
+<text class="small" x="125" y="317" text-anchor="middle">tagged VLAN 20</text>
+<text class="small" x="125" y="338" text-anchor="middle">DHCP + DNS</text>
+<rect class="switch" x="385" y="245" width="150" height="120" rx="12"/>
+<text class="label" x="460" y="283" text-anchor="middle">service-switch</text>
+<text class="small" x="460" y="309" text-anchor="middle">VLAN-aware</text>
+<text class="vlan" x="460" y="335" text-anchor="middle">10 · 20</text>
+<rect class="host" x="355" y="55" width="210" height="135" rx="14"/>
+<text class="label" x="460" y="95" text-anchor="middle">management_host</text>
+<text class="small" x="460" y="120" text-anchor="middle">access VLAN 10</text>
+<text class="small" x="460" y="142" text-anchor="middle">10.50.10.254</text>
+<text class="small" x="460" y="164" text-anchor="middle">forwarding isolated</text>
+<rect class="router" x="650" y="245" width="150" height="120" rx="14"/>
+<text class="label" x="725" y="280" text-anchor="middle">services router</text>
+<text class="small" x="725" y="305" text-anchor="middle">VLAN gateways</text>
+<text class="small" x="725" y="326" text-anchor="middle">DHCP · local NAT</text>
+<rect class="router" x="900" y="245" width="150" height="120" rx="14"/>
+<text class="label" x="975" y="280" text-anchor="middle">edge router</text>
+<text class="small" x="975" y="305" text-anchor="middle">external access</text>
+<text class="small" x="975" y="326" text-anchor="middle">host NAT</text>
+<path class="cloud" d="M930 100c-20-29 21-57 44-31 25-22 58 8 38 34 36 8 28 56-7 56h-63c-39 0-42-48-12-59z"/>
+<text class="label" x="975" y="130" text-anchor="middle">Internet</text>
+<text class="vlan" x="292" y="120">802.1Q trunk</text>
+<text class="small" x="823" y="293">198.18.0.0/30</text>
+<rect x="25" y="470" width="565" height="30" rx="6" fill="#fff" stroke="#cbd5e1"/>
+<text class="small" x="40" y="490">Legend: blue VM · violet router · green VLAN switch · amber management host · red Internet</text>
+</svg>

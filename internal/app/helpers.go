@@ -102,6 +102,7 @@ func (a *App) reconcileNamespaceHelpers(ctx context.Context, cfg *config.Config,
 		if err != nil {
 			return fmt.Errorf("start dnsmasq %s: %w", key, err)
 		}
+		defer started.DiscardStartupStderr()
 		want.Process = &state.Process{PID: started.PID, StartedAt: a.Now().UTC(), Executable: "dnsmasq", IdentityArg: marker}
 		m.Helpers[key] = want
 		if err := state.Save(layout.ManifestPath, m); err != nil {
@@ -114,11 +115,15 @@ func (a *App) reconcileNamespaceHelpers(ctx context.Context, cfg *config.Config,
 		if started.Cmd != nil {
 			time.Sleep(50 * time.Millisecond)
 			if !a.Processes.Alive(started.PID) {
+				if stderr := started.StartupStderr(); stderr != "" {
+					return fmt.Errorf("dnsmasq %s exited during startup: %s", key, stderr)
+				}
 				return fmt.Errorf("dnsmasq %s exited during startup", key)
 			}
 			if err := verifyHelperIdentity(a.Processes, want.Process); err != nil {
 				return err
 			}
+			started.DiscardStartupStderr()
 		}
 	}
 	return nil
@@ -170,7 +175,11 @@ func findDHCP(cfg *config.Config, router, logical string) *config.DHCPServer {
 
 func renderDNSMasqConfig(iface string, d *config.DHCPServer) string {
 	var b strings.Builder
-	b.WriteString("bind-interfaces\ninterface=" + iface + "\ndhcp-authoritative\n")
+	// Each DHCP-enabled router interface has its own supervised dnsmasq in the
+	// same network namespace. Disable DNS service so those helpers do not all
+	// contend for the namespace's port 53; DNS is supplied to clients via the
+	// configured DHCP option instead.
+	b.WriteString("port=0\nbind-interfaces\ninterface=" + iface + "\ndhcp-authoritative\n")
 	b.WriteString("dhcp-range=" + d.RangeStart + "," + d.RangeEnd + "," + d.Lease + "\n")
 	if len(d.DNSServers) > 0 {
 		b.WriteString("dhcp-option=option:dns-server," + strings.Join(d.DNSServers, ",") + "\n")

@@ -83,7 +83,7 @@ func TestNamespaceDNSMasqIsSupervisedAndOwned(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "dhcp-range=10.0.0.10,10.0.0.20,12h") {
+	if !strings.Contains(string(data), "port=0\n") || !strings.Contains(string(data), "dhcp-range=10.0.0.10,10.0.0.20,12h") {
 		t.Fatalf("bad config: %s", data)
 	}
 	if err := a.stopNamespaceHelpers(m); err != nil {

@@ -1,0 +1,87 @@
+name: vm-features
+
+templates:
+  ubuntu-26.04: "${TOPOLAB_TEMPLATE:?set TOPOLAB_TEMPLATE to an Ubuntu 26.04 amd64 cloud image}"
+
+management_host:
+  interfaces:
+    management:
+      ipv4:
+        addresses: [192.0.2.254/24]
+
+vms:
+  feature-rich:
+    template: ubuntu-26.04
+    cpu: {model: host, sockets: 1, cores: 4, threads: 1}
+    memory_mb: 4096
+    memory_balloon: {enabled: true, target_mb: 3072}
+    root_disk: {size_gib: 8, bus: scsi}
+    additional_disks:
+      data: {size_gib: 2, bus: virtio}
+      archive: {size_gib: 1, bus: nvme}
+    guest_agent: true
+    boot: {order: [disk, network], menu: true, strict: true}
+    ssh_authorized_keys:
+      - "${TOPOLAB_SSH_PUBLIC_KEY:?set TOPOLAB_SSH_PUBLIC_KEY to an OpenSSH public key}"
+    interfaces:
+      primary:
+        model: virtio
+        queues: 4
+        ipv4:
+          addresses: [192.0.2.10/24]
+          routes: [{to: default, via: 192.0.2.1}]
+          dns_servers: [1.1.1.1]
+      legacy:
+        model: e1000e
+  lifecycle:
+    template: ubuntu-26.04
+    root_disk: {bus: virtio}
+    additional_disks:
+      state: {size_gib: 1, bus: scsi}
+    boot: {order: [network, disk]}
+    ssh_authorized_keys:
+      - "${TOPOLAB_SSH_PUBLIC_KEY:?set TOPOLAB_SSH_PUBLIC_KEY to an OpenSSH public key}"
+    interfaces:
+      primary:
+        ipv4:
+          addresses: [192.0.2.11/24]
+          routes: [{to: default, via: 192.0.2.1}]
+          dns_servers: [1.1.1.1]
+
+routers:
+  edge:
+    interfaces:
+      management:
+        ipv4:
+          addresses: [192.0.2.1/24]
+      external:
+        external:
+          sources: [192.0.2.0/24]
+          egress_interface: auto
+          source_ip: auto
+
+switches:
+  management-net: {}
+  isolated-net: {}
+
+links:
+  management-host:
+    endpoints:
+      - {node: management_host, interface: management}
+      - {node: management-net, interface: management}
+  feature-primary:
+    endpoints:
+      - {node: feature-rich, interface: primary}
+      - {node: management-net, interface: feature-rich}
+  lifecycle-primary:
+    endpoints:
+      - {node: lifecycle, interface: primary}
+      - {node: management-net, interface: lifecycle}
+  feature-legacy:
+    endpoints:
+      - {node: feature-rich, interface: legacy}
+      - {node: isolated-net, interface: feature-rich}
+  edge-management:
+    endpoints:
+      - {node: edge, interface: management}
+      - {node: management-net, interface: edge}
