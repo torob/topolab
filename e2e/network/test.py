@@ -309,15 +309,15 @@ def main(harness: Harness) -> None:
         """name: legacy
 management_host:
   interfaces:
-    management:
+    - name: management
       ipv4: {addresses: [10.88.0.2/30]}
 routers:
-  router:
+  - name: router
     interfaces:
-      management:
+      - name: management
         ipv4: {addresses: [10.88.0.1/30]}
 links:
-  management:
+  - name: management
     endpoints:
       - {node: management_host, interface: management}
       - {node: router, interface: management}

@@ -60,7 +60,7 @@ func TestNamespaceDNSMasqIsSupervisedAndOwned(t *testing.T) {
 		t.Fatal(err)
 	}
 	dhcp := &config.DHCPServer{RangeStart: "10.0.0.10", RangeEnd: "10.0.0.20", Lease: "12h", DNSServers: []string{"1.1.1.1"}}
-	cfg := &config.Config{Name: "lab", Routers: map[string]*config.Router{"r": {Interfaces: map[string]*config.RouterInterface{"lan": {MTU: 1500, IPv4: &config.RouterIPv4{DHCPServer: dhcp}}}}}, VMs: map[string]*config.VM{}, Switches: map[string]*config.Switch{}, Links: map[string]*config.Link{}}
+	cfg := &config.Config{Name: "lab", Routers: []*config.Router{{Name: "r", Interfaces: []*config.RouterInterface{{Name: "lan", MTU: 1500, IPv4: &config.RouterIPv4{DHCPServer: dhcp}}}}}}
 	processes := &fakeProcesses{alive: map[int]bool{}, args: map[int][]string{}}
 	a := New(nil, nil)
 	a.Processes = processes
@@ -194,7 +194,7 @@ func TestWriteOnceBootstrapRejectedBeforeImageInspection(t *testing.T) {
 }
 
 func TestTranslateNetworkPreservesTransitAllocation(t *testing.T) {
-	cfg := &config.Config{Name: "lab", Routers: map[string]*config.Router{"r": {Interfaces: map[string]*config.RouterInterface{"wan": {MTU: 1500, External: &config.External{Sources: []string{"10.0.0.0/24"}, EgressInterface: "eth0", SourceIP: "192.0.2.2"}}}}}, Switches: map[string]*config.Switch{}, VMs: map[string]*config.VM{}, Links: map[string]*config.Link{}}
+	cfg := &config.Config{Name: "lab", Routers: []*config.Router{{Name: "r", Interfaces: []*config.RouterInterface{{Name: "wan", MTU: 1500, External: &config.External{Sources: []string{"10.0.0.0/24"}, EgressInterface: "eth0", SourceIP: "192.0.2.2"}}}}}}
 	prior := &network.State{External: []network.ResolvedExternal{{External: network.External{Router: "r", Interface: "wan", TransitPrefix: "198.18.1.0/30", RouterAddress: "198.18.1.1", HostAddress: "198.18.1.2"}}}}
 	got := translateNetwork(cfg, "/work/shared", prior)
 	if len(got.Externals) != 1 || got.Externals[0].TransitPrefix != "198.18.1.0/30" {
@@ -206,7 +206,7 @@ func TestTranslateNetworkPreservesTransitAllocation(t *testing.T) {
 }
 
 func TestCanonicalNetworkHashStableAcrossPersistedTransit(t *testing.T) {
-	cfg := &config.Config{Name: "lab", Routers: map[string]*config.Router{"r": {Interfaces: map[string]*config.RouterInterface{"wan": {MTU: 1500, External: &config.External{Sources: []string{"10.0.0.0/24"}, EgressInterface: "auto", SourceIP: "auto"}}}}}, Switches: map[string]*config.Switch{}, VMs: map[string]*config.VM{}, Links: map[string]*config.Link{}}
+	cfg := &config.Config{Name: "lab", Routers: []*config.Router{{Name: "r", Interfaces: []*config.RouterInterface{{Name: "wan", MTU: 1500, External: &config.External{Sources: []string{"10.0.0.0/24"}, EgressInterface: "auto", SourceIP: "auto"}}}}}}
 	resolved := network.ResolvedExternal{External: network.External{Router: "r", Interface: "wan", MTU: 1500, EgressInterface: "eth0", SourceIP: "192.0.2.2", Sources: []string{"10.0.0.0/24"}, TransitPrefix: "198.18.1.0/30", RouterAddress: "198.18.1.1", HostAddress: "198.18.1.2"}, Masquerade: true}
 	first := canonicalNetworkConfig(translateNetwork(cfg, "/work/shared", nil), []network.ResolvedExternal{resolved})
 	device := externalHostDevice("lab", resolved.External)
@@ -317,9 +317,9 @@ func TestRootCapacityBelowTemplateFailsBeforeMaterialization(t *testing.T) {
 		t.Fatal(err)
 	}
 	one := uint64(1)
-	cfg := &config.Config{Name: "lab", VMs: map[string]*config.VM{
-		"vm": {Template: "base", RootDisk: config.RootDisk{SizeGiB: &one, Bus: "scsi"}, MemoryBalloon: &config.MemoryBalloon{}, AdditionalDisks: map[string]*config.Disk{}, Interfaces: map[string]*config.VMInterface{}},
-	}, Routers: map[string]*config.Router{}, Switches: map[string]*config.Switch{}, Links: map[string]*config.Link{}}
+	cfg := &config.Config{Name: "lab", VMs: []*config.VM{
+		{Name: "vm", Template: "base", RootDisk: config.RootDisk{SizeGiB: &one, Bus: "scsi"}, MemoryBalloon: &config.MemoryBalloon{}},
+	}}
 	_, err = New(nil, nil).desiredNodes(cfg, layout, map[string]qemu.TemplateInfo{"base": {CapacityBytes: 2 * qemu.GiB}})
 	if err == nil || !strings.Contains(err.Error(), "smaller than template") {
 		t.Fatalf("unexpected error: %v", err)
@@ -329,10 +329,9 @@ func TestRootCapacityBelowTemplateFailsBeforeMaterialization(t *testing.T) {
 func TestTranslateNetworkUsesRouterEndpoint(t *testing.T) {
 	cfg := &config.Config{
 		Name:     "lab",
-		VMs:      map[string]*config.VM{},
-		Routers:  map[string]*config.Router{"r": {Interfaces: map[string]*config.RouterInterface{"lan": {MTU: 1500, MAC: "02:00:00:00:00:01"}}}},
-		Switches: map[string]*config.Switch{"s": {MTU: 1500}},
-		Links: map[string]*config.Link{"l": {MTU: 1500, Endpoints: []*config.Endpoint{
+		Routers:  []*config.Router{{Name: "r", Interfaces: []*config.RouterInterface{{Name: "lan", MTU: 1500, MAC: "02:00:00:00:00:01"}}}},
+		Switches: []*config.Switch{{Name: "s", MTU: 1500}},
+		Links: []*config.Link{{Name: "l", MTU: 1500, Endpoints: []*config.Endpoint{
 			{Node: "r", Interface: "lan"},
 			{Node: "s", Interface: "r", Port: &config.Port{Mode: "access"}},
 		}}},
@@ -344,7 +343,7 @@ func TestTranslateNetworkUsesRouterEndpoint(t *testing.T) {
 }
 
 func TestVMSelectionRejectsRouter(t *testing.T) {
-	cfg := &config.Config{Name: "lab", VMs: map[string]*config.VM{"vm": {}}, Routers: map[string]*config.Router{"r": {}}}
+	cfg := &config.Config{Name: "lab", VMs: []*config.VM{{Name: "vm"}}, Routers: []*config.Router{{Name: "r"}}}
 	if got, err := selectNodes(cfg, nil); err != nil || len(got) != 1 || got[0] != "vm" {
 		t.Fatalf("default VM selection = %v, %v", got, err)
 	}
@@ -354,7 +353,7 @@ func TestVMSelectionRejectsRouter(t *testing.T) {
 }
 
 func TestPSListsVMsBeforeRoutersAndLabelsRouter(t *testing.T) {
-	cfg := &config.Config{Name: "lab", VMs: map[string]*config.VM{"vm": {}}, Routers: map[string]*config.Router{"r": {}}, Switches: map[string]*config.Switch{}}
+	cfg := &config.Config{Name: "lab", VMs: []*config.VM{{Name: "vm"}}, Routers: []*config.Router{{Name: "r"}}}
 	netState := &network.State{Topology: "lab"}
 	m := state.NewManifest("lab")
 	m.Nodes["vm"] = &state.Node{Kind: "vm"}

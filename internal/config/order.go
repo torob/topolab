@@ -1,58 +1,10 @@
 package config
 
 import (
-	"slices"
-	"strconv"
+	"fmt"
 
 	"gopkg.in/yaml.v3"
 )
-
-func collectOrder(doc *yaml.Node) declarationOrder {
-	o := declarationOrder{
-		VMDisks: make(map[string][]string), VMInterfaces: make(map[string][]string),
-		VMVLANs: make(map[string]map[string][]int), RouterIfaces: make(map[string][]string),
-		RouterVLANs: make(map[string]map[string][]int),
-	}
-	root := documentMapping(doc)
-	o.Templates = stringKeys(mappingValue(root, "templates"))
-	o.ManagementHostInterfaces = stringKeys(mappingValue(mappingValue(root, "management_host"), "interfaces"))
-	vms := mappingValue(root, "vms")
-	o.VMs = stringKeys(vms)
-	for i := 0; vms != nil && i < len(vms.Content); i += 2 {
-		name, vm := vms.Content[i].Value, vms.Content[i+1]
-		o.VMDisks[name] = stringKeys(mappingValue(vm, "additional_disks"))
-		ifaces := mappingValue(vm, "interfaces")
-		o.VMInterfaces[name] = stringKeys(ifaces)
-		o.VMVLANs[name] = make(map[string][]int)
-		for j := 0; ifaces != nil && j < len(ifaces.Content); j += 2 {
-			o.VMVLANs[name][ifaces.Content[j].Value] = intKeys(mappingValue(ifaces.Content[j+1], "vlans"))
-		}
-	}
-	routers := mappingValue(root, "routers")
-	o.Routers = stringKeys(routers)
-	for i := 0; routers != nil && i < len(routers.Content); i += 2 {
-		name, router := routers.Content[i].Value, routers.Content[i+1]
-		ifaces := mappingValue(router, "interfaces")
-		o.RouterIfaces[name] = stringKeys(ifaces)
-		o.RouterVLANs[name] = make(map[string][]int)
-		for j := 0; ifaces != nil && j < len(ifaces.Content); j += 2 {
-			o.RouterVLANs[name][ifaces.Content[j].Value] = intKeys(mappingValue(ifaces.Content[j+1], "vlans"))
-		}
-	}
-	o.Switches = stringKeys(mappingValue(root, "switches"))
-	o.Links = stringKeys(mappingValue(root, "links"))
-	return o
-}
-
-func documentMapping(n *yaml.Node) *yaml.Node {
-	if n == nil {
-		return nil
-	}
-	if n.Kind == yaml.DocumentNode && len(n.Content) == 1 {
-		return n.Content[0]
-	}
-	return n
-}
 
 func mappingValue(n *yaml.Node, key string) *yaml.Node {
 	n = documentMapping(n)
@@ -67,160 +19,300 @@ func mappingValue(n *yaml.Node, key string) *yaml.Node {
 	return nil
 }
 
-func stringKeys(n *yaml.Node) []string {
-	if n == nil || n.Kind != yaml.MappingNode {
-		return nil
+func documentMapping(n *yaml.Node) *yaml.Node {
+	if n != nil && n.Kind == yaml.DocumentNode && len(n.Content) == 1 {
+		return n.Content[0]
 	}
-	r := make([]string, 0, len(n.Content)/2)
-	for i := 0; i < len(n.Content); i += 2 {
-		r = append(r, n.Content[i].Value)
-	}
-	return r
+	return n
 }
 
-func intKeys(n *yaml.Node) []int {
-	if n == nil || n.Kind != yaml.MappingNode {
-		return nil
+type configIndex struct {
+	templates                map[string]*Template
+	managementHostInterfaces map[string]*ManagementHostInterface
+	vms                      map[string]*VM
+	vmDisks                  map[string]map[string]*Disk
+	vmInterfaces             map[string]map[string]*VMInterface
+	vmVLANs                  map[string]map[string]map[int]*VMVLAN
+	routers                  map[string]*Router
+	routerInterfaces         map[string]map[string]*RouterInterface
+	routerVLANs              map[string]map[string]map[int]*RouterVLAN
+	switches                 map[string]*Switch
+	links                    map[string]*Link
+}
+
+func buildIndexes(c *Config) error {
+	idx := &configIndex{
+		templates: map[string]*Template{}, managementHostInterfaces: map[string]*ManagementHostInterface{},
+		vms: map[string]*VM{}, vmDisks: map[string]map[string]*Disk{}, vmInterfaces: map[string]map[string]*VMInterface{}, vmVLANs: map[string]map[string]map[int]*VMVLAN{},
+		routers: map[string]*Router{}, routerInterfaces: map[string]map[string]*RouterInterface{}, routerVLANs: map[string]map[string]map[int]*RouterVLAN{},
+		switches: map[string]*Switch{}, links: map[string]*Link{},
 	}
-	r := make([]int, 0, len(n.Content)/2)
-	for i := 0; i < len(n.Content); i += 2 {
-		var v int
-		if n.Content[i].Decode(&v) == nil {
-			r = append(r, v)
+	if err := indexNamed("template", c.Templates, func(v *Template) string { return v.Name }, idx.templates); err != nil {
+		return err
+	}
+	if err := indexNamed("management-host interface", c.ManagementHost.Interfaces, func(v *ManagementHostInterface) string { return v.Name }, idx.managementHostInterfaces); err != nil {
+		return err
+	}
+	if err := indexNamed("VM", c.VMs, func(v *VM) string { return v.Name }, idx.vms); err != nil {
+		return err
+	}
+	for _, vm := range c.VMs {
+		idx.vmDisks[vm.Name] = map[string]*Disk{}
+		if err := indexNamed(fmt.Sprintf("VM %q disk", vm.Name), vm.AdditionalDisks, func(v *Disk) string { return v.Name }, idx.vmDisks[vm.Name]); err != nil {
+			return err
+		}
+		idx.vmInterfaces[vm.Name] = map[string]*VMInterface{}
+		idx.vmVLANs[vm.Name] = map[string]map[int]*VMVLAN{}
+		if err := indexNamed(fmt.Sprintf("VM %q interface", vm.Name), vm.Interfaces, func(v *VMInterface) string { return v.Name }, idx.vmInterfaces[vm.Name]); err != nil {
+			return err
+		}
+		for _, iface := range vm.Interfaces {
+			idx.vmVLANs[vm.Name][iface.Name] = map[int]*VMVLAN{}
+			if err := indexVLANs(fmt.Sprintf("VM %q interface %q", vm.Name, iface.Name), iface.VLANs, func(v *VMVLAN) int { return v.ID }, idx.vmVLANs[vm.Name][iface.Name]); err != nil {
+				return err
+			}
 		}
 	}
-	return r
-}
-
-// Marshal emits normalized YAML while retaining source order for named maps.
-func Marshal(cfg *Config) ([]byte, error) {
-	var doc yaml.Node
-	if err := doc.Encode(cfg); err != nil {
-		return nil, err
+	if err := indexNamed("router", c.Routers, func(v *Router) string { return v.Name }, idx.routers); err != nil {
+		return err
 	}
-	root := documentMapping(&doc)
-	reorder(mappingValue(root, "templates"), cfg.order.Templates)
-	reorder(mappingValue(mappingValue(root, "management_host"), "interfaces"), cfg.order.ManagementHostInterfaces)
-	vms := mappingValue(root, "vms")
-	reorder(vms, cfg.order.VMs)
-	for _, name := range cfg.order.VMs {
-		vm := mappingValue(vms, name)
-		reorder(mappingValue(vm, "additional_disks"), cfg.order.VMDisks[name])
-		ifaces := mappingValue(vm, "interfaces")
-		reorder(ifaces, cfg.order.VMInterfaces[name])
-		for _, iface := range cfg.order.VMInterfaces[name] {
-			reorderInts(mappingValue(mappingValue(ifaces, iface), "vlans"), cfg.order.VMVLANs[name][iface])
+	for _, router := range c.Routers {
+		idx.routerInterfaces[router.Name] = map[string]*RouterInterface{}
+		idx.routerVLANs[router.Name] = map[string]map[int]*RouterVLAN{}
+		if err := indexNamed(fmt.Sprintf("router %q interface", router.Name), router.Interfaces, func(v *RouterInterface) string { return v.Name }, idx.routerInterfaces[router.Name]); err != nil {
+			return err
+		}
+		for _, iface := range router.Interfaces {
+			idx.routerVLANs[router.Name][iface.Name] = map[int]*RouterVLAN{}
+			if err := indexVLANs(fmt.Sprintf("router %q interface %q", router.Name, iface.Name), iface.VLANs, func(v *RouterVLAN) int { return v.ID }, idx.routerVLANs[router.Name][iface.Name]); err != nil {
+				return err
+			}
 		}
 	}
-	routers := mappingValue(root, "routers")
-	reorder(routers, cfg.order.Routers)
-	for _, name := range cfg.order.Routers {
-		ifaces := mappingValue(mappingValue(routers, name), "interfaces")
-		reorder(ifaces, cfg.order.RouterIfaces[name])
-		for _, iface := range cfg.order.RouterIfaces[name] {
-			reorderInts(mappingValue(mappingValue(ifaces, iface), "vlans"), cfg.order.RouterVLANs[name][iface])
+	if err := indexNamed("switch", c.Switches, func(v *Switch) string { return v.Name }, idx.switches); err != nil {
+		return err
+	}
+	if err := indexNamed("link", c.Links, func(v *Link) string { return v.Name }, idx.links); err != nil {
+		return err
+	}
+	c.index = idx
+	return nil
+}
+
+func indexNamed[T any](kind string, values []*T, identity func(*T) string, dst map[string]*T) error {
+	for i, value := range values {
+		if value == nil {
+			return fmt.Errorf("%s entry %d is null", kind, i)
+		}
+		name := identity(value)
+		if name == "" {
+			return fmt.Errorf("%s entry %d is missing name", kind, i)
+		}
+		if _, exists := dst[name]; exists {
+			return fmt.Errorf("duplicate %s name %q", kind, name)
+		}
+		dst[name] = value
+	}
+	return nil
+}
+
+func indexVLANs[T any](kind string, values []*T, identity func(*T) int, dst map[int]*T) error {
+	for i, value := range values {
+		if value == nil {
+			return fmt.Errorf("%s VLAN entry %d is null", kind, i)
+		}
+		id := identity(value)
+		if id == 0 {
+			return fmt.Errorf("%s VLAN entry %d is missing id", kind, i)
+		}
+		if _, exists := dst[id]; exists {
+			return fmt.Errorf("%s duplicates VLAN id %d", kind, id)
+		}
+		dst[id] = value
+	}
+	return nil
+}
+
+// Marshal serializes only the authoritative slices, in their declared order.
+func Marshal(cfg *Config) ([]byte, error) { return yaml.Marshal(cfg) }
+
+func (c *Config) LookupTemplate(name string) (*Template, bool) {
+	if c.index != nil {
+		v, ok := c.index.templates[name]
+		return v, ok
+	}
+	return findNamed(c.Templates, name, func(v *Template) string { return v.Name })
+}
+func (c *Config) LookupManagementHostInterface(name string) (*ManagementHostInterface, bool) {
+	if c.index != nil {
+		v, ok := c.index.managementHostInterfaces[name]
+		return v, ok
+	}
+	return findNamed(c.ManagementHost.Interfaces, name, func(v *ManagementHostInterface) string { return v.Name })
+}
+func (c *Config) LookupVM(name string) (*VM, bool) {
+	if c.index != nil {
+		v, ok := c.index.vms[name]
+		return v, ok
+	}
+	return findNamed(c.VMs, name, func(v *VM) string { return v.Name })
+}
+func (c *Config) LookupRouter(name string) (*Router, bool) {
+	if c.index != nil {
+		v, ok := c.index.routers[name]
+		return v, ok
+	}
+	return findNamed(c.Routers, name, func(v *Router) string { return v.Name })
+}
+func (c *Config) LookupSwitch(name string) (*Switch, bool) {
+	if c.index != nil {
+		v, ok := c.index.switches[name]
+		return v, ok
+	}
+	return findNamed(c.Switches, name, func(v *Switch) string { return v.Name })
+}
+func (c *Config) LookupLink(name string) (*Link, bool) {
+	if c.index != nil {
+		v, ok := c.index.links[name]
+		return v, ok
+	}
+	return findNamed(c.Links, name, func(v *Link) string { return v.Name })
+}
+
+func (c *Config) LookupVMInterface(vm, name string) (*VMInterface, bool) {
+	if c.index != nil {
+		v, ok := c.index.vmInterfaces[vm][name]
+		return v, ok
+	}
+	parent, ok := c.LookupVM(vm)
+	if !ok {
+		return nil, false
+	}
+	return findNamed(parent.Interfaces, name, func(v *VMInterface) string { return v.Name })
+}
+func (c *Config) LookupVMAdditionalDisk(vm, name string) (*Disk, bool) {
+	if c.index != nil {
+		v, ok := c.index.vmDisks[vm][name]
+		return v, ok
+	}
+	parent, ok := c.LookupVM(vm)
+	if !ok {
+		return nil, false
+	}
+	return findNamed(parent.AdditionalDisks, name, func(v *Disk) string { return v.Name })
+}
+func (c *Config) LookupVMVLAN(vm, iface string, id int) (*VMVLAN, bool) {
+	if c.index != nil {
+		v, ok := c.index.vmVLANs[vm][iface][id]
+		return v, ok
+	}
+	parent, ok := c.LookupVMInterface(vm, iface)
+	if !ok {
+		return nil, false
+	}
+	return findID(parent.VLANs, id, func(v *VMVLAN) int { return v.ID })
+}
+func (c *Config) LookupRouterInterface(router, name string) (*RouterInterface, bool) {
+	if c.index != nil {
+		v, ok := c.index.routerInterfaces[router][name]
+		return v, ok
+	}
+	parent, ok := c.LookupRouter(router)
+	if !ok {
+		return nil, false
+	}
+	return findNamed(parent.Interfaces, name, func(v *RouterInterface) string { return v.Name })
+}
+func (c *Config) LookupRouterVLAN(router, iface string, id int) (*RouterVLAN, bool) {
+	if c.index != nil {
+		v, ok := c.index.routerVLANs[router][iface][id]
+		return v, ok
+	}
+	parent, ok := c.LookupRouterInterface(router, iface)
+	if !ok {
+		return nil, false
+	}
+	return findID(parent.VLANs, id, func(v *RouterVLAN) int { return v.ID })
+}
+
+func findNamed[T any](values []*T, name string, identity func(*T) string) (*T, bool) {
+	for _, v := range values {
+		if v != nil && identity(v) == name {
+			return v, true
 		}
 	}
-	reorder(mappingValue(root, "switches"), cfg.order.Switches)
-	reorder(mappingValue(root, "links"), cfg.order.Links)
-	return yaml.Marshal(&doc)
+	return nil, false
 }
-
-func reorder(n *yaml.Node, keys []string) {
-	if n == nil || n.Kind != yaml.MappingNode || len(keys) == 0 {
-		return
-	}
-	pairs := make(map[string][2]*yaml.Node, len(n.Content)/2)
-	original := make([]string, 0, len(n.Content)/2)
-	for i := 0; i < len(n.Content); i += 2 {
-		pairs[n.Content[i].Value] = [2]*yaml.Node{n.Content[i], n.Content[i+1]}
-		original = append(original, n.Content[i].Value)
-	}
-	n.Content = n.Content[:0]
-	for _, key := range keys {
-		if p, ok := pairs[key]; ok {
-			n.Content = append(n.Content, p[0], p[1])
-			delete(pairs, key)
+func findID[T any](values []*T, id int, identity func(*T) int) (*T, bool) {
+	for _, v := range values {
+		if v != nil && identity(v) == id {
+			return v, true
 		}
 	}
-	for _, key := range original {
-		if p, ok := pairs[key]; ok {
-			n.Content = append(n.Content, p[0], p[1])
-		}
-	}
+	return nil, false
 }
 
-func reorderInts(n *yaml.Node, keys []int) {
-	ss := make([]string, len(keys))
-	for i, k := range keys {
-		ss[i] = yamlInt(k)
-	}
-	reorder(n, ss)
+func (c *Config) VMNames() []string { return names(c.VMs, func(v *VM) string { return v.Name }) }
+func (c *Config) RouterNames() []string {
+	return names(c.Routers, func(v *Router) string { return v.Name })
 }
-
-func yamlInt(v int) string {
-	return strconv.Itoa(v)
+func (c *Config) SwitchNames() []string {
+	return names(c.Switches, func(v *Switch) string { return v.Name })
 }
-
-// The order accessors expose declaration order to runtime generators. They
-// return copies so callers cannot mutate parser state.
-func (c *Config) VMNames() []string     { return ordered(c.order.VMs, c.VMs) }
-func (c *Config) RouterNames() []string { return ordered(c.order.Routers, c.Routers) }
-func (c *Config) SwitchNames() []string { return ordered(c.order.Switches, c.Switches) }
-func (c *Config) LinkNames() []string   { return ordered(c.order.Links, c.Links) }
+func (c *Config) LinkNames() []string { return names(c.Links, func(v *Link) string { return v.Name }) }
 func (c *Config) ManagementHostInterfaceNames() []string {
-	return ordered(c.order.ManagementHostInterfaces, c.ManagementHost.Interfaces)
+	return names(c.ManagementHost.Interfaces, func(v *ManagementHostInterface) string { return v.Name })
 }
 func (c *Config) VMInterfaceNames(vm string) []string {
-	return ordered(c.order.VMInterfaces[vm], c.VMs[vm].Interfaces)
+	v, ok := c.LookupVM(vm)
+	if !ok {
+		return nil
+	}
+	return names(v.Interfaces, func(v *VMInterface) string { return v.Name })
 }
 func (c *Config) VMAdditionalDiskNames(vm string) []string {
-	return ordered(c.order.VMDisks[vm], c.VMs[vm].AdditionalDisks)
+	v, ok := c.LookupVM(vm)
+	if !ok {
+		return nil
+	}
+	return names(v.AdditionalDisks, func(v *Disk) string { return v.Name })
 }
 func (c *Config) VMVLANIDs(vm, iface string) []int {
-	return orderedInts(c.order.VMVLANs[vm][iface], c.VMs[vm].Interfaces[iface].VLANs)
+	v, ok := c.LookupVMInterface(vm, iface)
+	if !ok {
+		return nil
+	}
+	return ids(v.VLANs, func(v *VMVLAN) int { return v.ID })
 }
 func (c *Config) RouterInterfaceNames(router string) []string {
-	return ordered(c.order.RouterIfaces[router], c.Routers[router].Interfaces)
+	v, ok := c.LookupRouter(router)
+	if !ok {
+		return nil
+	}
+	return names(v.Interfaces, func(v *RouterInterface) string { return v.Name })
 }
 func (c *Config) RouterVLANIDs(router, iface string) []int {
-	return orderedInts(c.order.RouterVLANs[router][iface], c.Routers[router].Interfaces[iface].VLANs)
+	v, ok := c.LookupRouterInterface(router, iface)
+	if !ok {
+		return nil
+	}
+	return ids(v.VLANs, func(v *RouterVLAN) int { return v.ID })
 }
-
-func ordered[T any](preferred []string, values map[string]T) []string {
-	seen := make(map[string]bool, len(values))
+func names[T any](values []*T, identity func(*T) string) []string {
 	out := make([]string, 0, len(values))
-	for _, name := range preferred {
-		if _, ok := values[name]; ok && !seen[name] {
-			out = append(out, name)
-			seen[name] = true
+	for _, v := range values {
+		if v != nil {
+			out = append(out, identity(v))
 		}
 	}
-	var rest []string
-	for name := range values {
-		if !seen[name] {
-			rest = append(rest, name)
-		}
-	}
-	slices.Sort(rest)
-	return append(out, rest...)
+	return out
 }
-
-func orderedInts[T any](preferred []int, values map[int]T) []int {
-	seen := make(map[int]bool, len(values))
+func ids[T any](values []*T, identity func(*T) int) []int {
 	out := make([]int, 0, len(values))
-	for _, id := range preferred {
-		if _, ok := values[id]; ok && !seen[id] {
-			out = append(out, id)
-			seen[id] = true
+	for _, v := range values {
+		if v != nil {
+			out = append(out, identity(v))
 		}
 	}
-	var rest []int
-	for id := range values {
-		if !seen[id] {
-			rest = append(rest, id)
-		}
-	}
-	slices.Sort(rest)
-	return append(out, rest...)
+	return out
 }

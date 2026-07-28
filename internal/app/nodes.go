@@ -23,8 +23,8 @@ type bootstrapSnapshot struct {
 
 func (a *App) desiredNodes(cfg *config.Config, layout state.Layout, templates map[string]qemu.TemplateInfo) (map[string]*state.Node, error) {
 	out := map[string]*state.Node{}
-	for _, name := range cfg.VMNames() {
-		vm, tmpl := cfg.VMs[name], templates[cfg.VMs[name].Template]
+	for _, vm := range cfg.VMs {
+		name, tmpl := vm.Name, templates[vm.Template]
 		dir, _ := layout.NodeDir(name)
 		storage, _ := state.Hash(struct{ Path, Digest string }{tmpl.Path, tmpl.Digest})
 		snapshot := bootstrapSnapshot{AuthorizedKeys: append([]string(nil), vm.SSHAuthorizedKeys...), Network: vmCloudNetwork(cfg, name, vm)}
@@ -53,8 +53,8 @@ func (a *App) desiredNodes(cfg *config.Config, layout state.Layout, templates ma
 			target := uint64(*vm.MemoryBalloon.TargetMB)
 			n.BalloonTargetMB = &target
 		}
-		for _, dn := range cfg.VMAdditionalDiskNames(name) {
-			d := vm.AdditionalDisks[dn]
+		for _, d := range vm.AdditionalDisks {
+			dn := d.Name
 			size, err := qemu.GiBToBytes(d.SizeGiB)
 			if err != nil {
 				return nil, err
@@ -122,12 +122,11 @@ func vmRestartSnapshot(cfg *config.Config, name string, vm *config.VM) any {
 		NICs                []nic
 		Disks               []disk
 	}{vm.CPU, vm.MemoryMB, vm.MemoryBalloon.Enabled, vm.GuestAgent, vm.RootDisk.Bus, vm.Boot, nil, nil}
-	for _, n := range cfg.VMInterfaceNames(name) {
-		i := vm.Interfaces[n]
-		r.NICs = append(r.NICs, nic{n, i.Model, i.Queues})
+	for _, i := range vm.Interfaces {
+		r.NICs = append(r.NICs, nic{i.Name, i.Model, i.Queues})
 	}
-	for _, n := range cfg.VMAdditionalDiskNames(name) {
-		r.Disks = append(r.Disks, disk{n, vm.AdditionalDisks[n].Bus})
+	for _, d := range vm.AdditionalDisks {
+		r.Disks = append(r.Disks, disk{d.Name, d.Bus})
 	}
 	return r
 }
@@ -264,7 +263,8 @@ func (a *App) growDisk(ctx context.Context, node *state.Node, disk *state.Disk, 
 }
 
 func templateName(cfg *config.Config, node string) string {
-	return cfg.VMs[node].Template
+	vm, _ := cfg.LookupVM(node)
+	return vm.Template
 }
 
 func rootDiskNeedsCreate(old, want *state.Node) bool {
@@ -454,15 +454,15 @@ func (a *App) waitNodeReady(ctx context.Context, name string, n *state.Node, sta
 
 func qemuSpec(cfg *config.Config, name string, n *state.Node, netState *network.State) (qemu.NodeSpec, error) {
 	s := qemu.NodeSpec{Topology: cfg.Name, Name: name, Firmware: qemu.Firmware{Code: ovmfCode, Vars: n.OVMFVarsPath}, QMPPath: n.QMPPath, PIDFile: n.PIDFile, SerialSocket: n.SerialSocketPath, GuestAgentSocket: n.GuestAgentPath, SeedPath: n.SeedPath}
-	vm := cfg.VMs[name]
-	if vm == nil {
+	vm, ok := cfg.LookupVM(name)
+	if !ok {
 		return s, fmt.Errorf("unknown VM %q", name)
 	}
 	s.CPU = qemu.CPU{Model: vm.CPU.Model, Sockets: *vm.CPU.Sockets, Cores: *vm.CPU.Cores, Threads: *vm.CPU.Threads}
 	s.Memory = qemu.Memory{MiB: uint64(vm.MemoryMB), Balloon: vm.MemoryBalloon.Enabled}
 	s.Boot = qemu.BootSpec{Order: vm.Boot.Order, Menu: vm.Boot.Menu, Strict: vm.Boot.Strict}
-	for _, in := range cfg.VMInterfaceNames(name) {
-		v, tap := vm.Interfaces[in], netState.TAPs[name+":"+in]
+	for _, v := range vm.Interfaces {
+		in, tap := v.Name, netState.TAPs[name+":"+v.Name]
 		if tap.Name == "" {
 			return s, fmt.Errorf("node %s interface %s has no managed TAP", name, in)
 		}

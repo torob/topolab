@@ -62,7 +62,7 @@ def main(harness: Harness) -> None:
         "queues: 4",
         "model: e1000e",
         "bus: nvme",
-        "order:\n                - disk\n                - network",
+        "order:\n            - disk\n            - network",
         "guest_agent: true",
     ):
         require(
@@ -163,7 +163,7 @@ def main(harness: Harness) -> None:
         "ps omitted the updated balloon target",
     )
 
-    harness.replace_topology("data: {size_gib: 2", "data: {size_gib: 3")
+    harness.replace_topology("name: data, size_gib: 2", "name: data, size_gib: 3")
     harness.run("up")
     require(
         running_pid(harness, "feature-rich") == initial_feature_pid,

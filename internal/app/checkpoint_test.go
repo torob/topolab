@@ -104,7 +104,7 @@ func TestMaterializeCheckpointsDiskIntentAndRetriesPartialCreation(t *testing.T)
 	a.Images = images
 	a.Seeds = checkpointSeeds{}
 	a.defaults()
-	cfg := &config.Config{Name: "lab", VMs: map[string]*config.VM{"vm": {}}, Routers: map[string]*config.Router{}}
+	cfg := &config.Config{Name: "lab", VMs: []*config.VM{{Name: "vm"}}}
 	m := state.NewManifest("lab")
 	err := a.materializeNodes(context.Background(), cfg, layout, m, map[string]*state.Node{"vm": want}, &network.State{TAPs: map[string]network.TAPState{}}, map[string]qemu.TemplateInfo{"": {CapacityBytes: 100}})
 	if err == nil {
@@ -136,7 +136,7 @@ func TestMaterializeCheckpointsDiskIntentAndRetriesPartialCreation(t *testing.T)
 func TestHelperArtifactsAreWriteAheadAndRetryable(t *testing.T) {
 	layout, _ := shortLayout(t)
 	dhcp := &config.DHCPServer{RangeStart: "10.0.0.10", RangeEnd: "10.0.0.20", Lease: "1h"}
-	cfg := &config.Config{Name: "lab", Routers: map[string]*config.Router{"r": {Interfaces: map[string]*config.RouterInterface{"lan": {IPv4: &config.RouterIPv4{DHCPServer: dhcp}}}}}}
+	cfg := &config.Config{Name: "lab", Routers: []*config.Router{{Name: "r", Interfaces: []*config.RouterInterface{{Name: "lan", IPv4: &config.RouterIPv4{DHCPServer: dhcp}}}}}}
 	m := state.NewManifest("lab")
 	if err := state.Save(layout.ManifestPath, m); err != nil {
 		t.Fatal(err)
@@ -210,7 +210,7 @@ func (s checkpointStopper) Stop(_ context.Context, pid int, _, _, _ string) erro
 func TestStartCheckpointsPIDWhenReadinessFails(t *testing.T) {
 	layout, _ := shortLayout(t)
 	one := 1
-	cfg := &config.Config{Name: "lab", VMs: map[string]*config.VM{"vm": {CPU: &config.CPU{Model: "host", Sockets: &one, Cores: &one, Threads: &one}, MemoryMB: 128, MemoryBalloon: &config.MemoryBalloon{}, Boot: config.Boot{Order: []string{"disk"}}, Interfaces: map[string]*config.VMInterface{}}}, Routers: map[string]*config.Router{}}
+	cfg := &config.Config{Name: "lab", VMs: []*config.VM{{Name: "vm", CPU: &config.CPU{Model: "host", Sockets: &one, Cores: &one, Threads: &one}, MemoryMB: 128, MemoryBalloon: &config.MemoryBalloon{}, Boot: config.Boot{Order: []string{"disk"}}}}}
 	n := checkpointDesired(layout)
 	n.AdditionalDisks = nil
 	n.SeedPending = false
@@ -255,7 +255,7 @@ func TestStartCheckpointsPIDWhenReadinessFails(t *testing.T) {
 
 func TestRestartCheckpointsSuccessfulStopBeforeLaterHelperError(t *testing.T) {
 	layout, _ := shortLayout(t)
-	cfg := &config.Config{Name: "lab", VMs: map[string]*config.VM{"vm": {}}, Routers: map[string]*config.Router{}}
+	cfg := &config.Config{Name: "lab", VMs: []*config.VM{{Name: "vm"}}}
 	n := checkpointDesired(layout)
 	n.PID = 10
 	n.Process = &state.Process{PID: 10}

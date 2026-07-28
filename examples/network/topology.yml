@@ -2,30 +2,30 @@ name: network
 
 management_host:
   interfaces:
-    management:
+    - name: management
       ipv4:
         addresses: [192.0.2.254/24]
 
 routers:
-  left:
+  - name: left
     interfaces:
-      trunk:
+      - name: trunk
         vlans:
-          10:
+          - id: 10
             ipv4:
               addresses: [192.0.2.1/24]
-  right:
+  - name: right
     interfaces:
-      access:
+      - name: access
         ipv4:
           addresses: [192.0.2.2/24]
 
 switches:
-  lan:
+  - name: lan
     vlan_filtering: true
 
 links:
-  left-lan:
+  - name: left-lan
     endpoints:
       - node: left
         interface: trunk
@@ -37,11 +37,11 @@ links:
       - node: lan
         interface: left
         port: {mode: trunk, allowed_vlans: [10]}
-  right-lan:
+  - name: right-lan
     endpoints:
       - {node: right, interface: access}
       - {node: lan, interface: right, port: {mode: access, vlan: 10}}
-  management-lan:
+  - name: management-lan
     endpoints:
       - {node: management_host, interface: management}
       - {node: lan, interface: management, port: {mode: access, vlan: 10}}

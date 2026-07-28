@@ -27,20 +27,19 @@ func translateNetwork(cfg *config.Config, shared string, prior *network.State) n
 			return strings.Compare(a.Prefix+"\x00"+a.Device+"\x00"+a.Via, b.Prefix+"\x00"+b.Device+"\x00"+b.Via)
 		})
 	}
-	for _, name := range cfg.SwitchNames() {
-		s := cfg.Switches[name]
-		out.Switches = append(out.Switches, network.Switch{Name: name, MTU: s.MTU, STP: s.STP, VLANFiltering: s.VLANFiltering})
+	for _, s := range cfg.Switches {
+		out.Switches = append(out.Switches, network.Switch{Name: s.Name, MTU: s.MTU, STP: s.STP, VLANFiltering: s.VLANFiltering})
 	}
-	for _, name := range cfg.RouterNames() {
-		r := cfg.Routers[name]
+	for _, r := range cfg.Routers {
+		name := r.Name
 		nr := network.Router{Name: name}
 		for _, iface := range r.Interfaces {
 			if iface.External != nil {
 				nr.Forwarding = true
 			}
 		}
-		for _, in := range cfg.RouterInterfaceNames(name) {
-			i := r.Interfaces[in]
+		for _, i := range r.Interfaces {
+			in := i.Name
 			if i.External != nil {
 				continue
 			}
@@ -49,8 +48,8 @@ func translateNetwork(cfg *config.Config, shared string, prior *network.State) n
 				ri.Addresses = append([]string(nil), i.IPv4.Addresses...)
 				appendDHCP(&nr, in, i.IPv4)
 			}
-			for _, id := range cfg.RouterVLANIDs(name, in) {
-				v := i.VLANs[id]
+			for _, v := range i.VLANs {
+				id := v.ID
 				nv := network.VLAN{ID: id, MTU: v.MTU}
 				if v.IPv4 != nil {
 					nv.Addresses = append([]string(nil), v.IPv4.Addresses...)
@@ -67,8 +66,8 @@ func translateNetwork(cfg *config.Config, shared string, prior *network.State) n
 			nr.Routes = append(nr.Routes, network.Route{To: route.To, Via: route.Via, Interface: route.Interface})
 		}
 		out.Routers = append(out.Routers, nr)
-		for _, in := range cfg.RouterInterfaceNames(name) {
-			i := r.Interfaces[in]
+		for _, i := range r.Interfaces {
+			in := i.Name
 			if i.External == nil {
 				continue
 			}
@@ -83,9 +82,8 @@ func translateNetwork(cfg *config.Config, shared string, prior *network.State) n
 			out.Externals = append(out.Externals, e)
 		}
 	}
-	for _, name := range cfg.LinkNames() {
-		l := cfg.Links[name]
-		nl := network.Link{Name: name, MTU: l.MTU}
+	for _, l := range cfg.Links {
+		nl := network.Link{Name: l.Name, MTU: l.MTU}
 		for i, ep := range l.Endpoints {
 			nl.Endpoints[i] = translateEndpoint(cfg, ep, l.MTU)
 		}
@@ -133,19 +131,15 @@ func translateEndpoint(cfg *config.Config, ep *config.Endpoint, linkMTU int) net
 	if ep.Egress != nil {
 		e.Egress = network.Impairment{LatencyMS: ep.Egress.LatencyMS, JitterMS: ep.Egress.JitterMS, LossPercent: ep.Egress.LossPercent, RateMbps: ep.Egress.RateMbps}
 	}
-	switch {
-	case ep.Node == "management_host":
-		h := cfg.ManagementHost.Interfaces[ep.Interface]
+	if ep.Node == "management_host" {
+		h, _ := cfg.LookupManagementHostInterface(ep.Interface)
 		e.Kind, e.MTU, e.MAC, e.Addresses = network.EndpointManagementHost, h.MTU, h.MAC, append([]string(nil), h.IPv4.Addresses...)
-	case cfg.VMs[ep.Node] != nil:
-		v := cfg.VMs[ep.Node].Interfaces[ep.Interface]
+	} else if v, ok := cfg.LookupVMInterface(ep.Node, ep.Interface); ok {
 		e.Kind, e.MAC, e.Queues = network.EndpointVM, v.MAC, v.Queues
-	case cfg.Routers[ep.Node] != nil:
-		v := cfg.Routers[ep.Node].Interfaces[ep.Interface]
+	} else if v, ok := cfg.LookupRouterInterface(ep.Node, ep.Interface); ok {
 		e.MTU, e.MAC = v.MTU, v.MAC
 		e.Kind = network.EndpointRouter
-	case cfg.Switches[ep.Node] != nil:
-		s := cfg.Switches[ep.Node]
+	} else if s, ok := cfg.LookupSwitch(ep.Node); ok {
 		e.Kind, e.MTU = network.EndpointSwitch, s.MTU
 		if ep.Port != nil {
 			e.Port.Mode, e.Port.AllowedVLANs = ep.Port.Mode, append([]int(nil), ep.Port.AllowedVLANs...)
@@ -162,11 +156,11 @@ func translateEndpoint(cfg *config.Config, ep *config.Endpoint, linkMTU int) net
 
 func vmCloudNetwork(cfg *config.Config, name string, vm *config.VM) cloudinit.Network {
 	var n cloudinit.Network
-	for _, in := range cfg.VMInterfaceNames(name) {
-		i := vm.Interfaces[in]
+	for _, i := range vm.Interfaces {
+		in := i.Name
 		ci := cloudinit.Interface{Name: in, MAC: i.MAC, MTU: i.MTU, IPv4: vmIPv4(i.IPv4)}
-		for _, id := range cfg.VMVLANIDs(name, in) {
-			v := i.VLANs[id]
+		for _, v := range i.VLANs {
+			id := v.ID
 			ci.VLANs = append(ci.VLANs, cloudinit.VLAN{ID: id, MTU: v.MTU, IPv4: vmIPv4(v.IPv4)})
 		}
 		n.Interfaces = append(n.Interfaces, ci)

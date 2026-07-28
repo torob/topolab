@@ -19,7 +19,8 @@ var (
 )
 
 func validateDecoded(c *Config) error {
-	for name, vm := range c.VMs {
+	for _, vm := range c.VMs {
+		name := vm.Name
 		if vm == nil {
 			continue
 		}
@@ -46,13 +47,13 @@ func validate(c *Config) ([]string, error) {
 	if !resourceName.MatchString(c.Name) {
 		return nil, fmt.Errorf("name %q must match %s", c.Name, resourceName)
 	}
-	for name := range c.Templates {
-		if err := named("template", name); err != nil {
+	for _, template := range c.Templates {
+		if err := named("template", template.Name); err != nil {
 			return nil, err
 		}
 	}
 	nodes := map[string]string{"management_host": "reserved management host"}
-	for kind, names := range map[string][]string{"VM": mapKeys(c.VMs), "router": mapKeys(c.Routers), "switch": mapKeys(c.Switches)} {
+	for kind, names := range map[string][]string{"VM": c.VMNames(), "router": c.RouterNames(), "switch": c.SwitchNames()} {
 		for _, name := range names {
 			if err := named(kind, name); err != nil {
 				return nil, err
@@ -63,13 +64,14 @@ func validate(c *Config) ([]string, error) {
 			nodes[name] = kind
 		}
 	}
-	for name := range c.Links {
-		if err := named("link", name); err != nil {
+	for _, link := range c.Links {
+		if err := named("link", link.Name); err != nil {
 			return nil, err
 		}
 	}
 	seenMAC, seenIP := map[string]string{}, map[netip.Addr]string{}
-	for name, h := range c.ManagementHost.Interfaces {
+	for _, h := range c.ManagementHost.Interfaces {
+		name := h.Name
 		if err := named("management-host interface", name); err != nil {
 			return nil, err
 		}
@@ -86,14 +88,14 @@ func validate(c *Config) ([]string, error) {
 			return nil, err
 		}
 	}
-	for name, vm := range c.VMs {
-		if err := validateVM(c, name, vm, seenMAC, seenIP); err != nil {
+	for _, vm := range c.VMs {
+		if err := validateVM(c, vm.Name, vm, seenMAC, seenIP); err != nil {
 			return nil, err
 		}
 	}
 	externalCount := 0
-	for name, r := range c.Routers {
-		n, err := validateRouter(name, r, seenMAC, seenIP)
+	for _, r := range c.Routers {
+		n, err := validateRouter(r.Name, r, seenMAC, seenIP)
 		if err != nil {
 			return nil, err
 		}
@@ -102,8 +104,8 @@ func validate(c *Config) ([]string, error) {
 	if len(c.Links) == 0 && externalCount == 0 {
 		return nil, errors.New("topology requires at least one link or external router interface")
 	}
-	for name, sw := range c.Switches {
-		if err := validMTU(sw.MTU, "switch "+name); err != nil {
+	for _, sw := range c.Switches {
+		if err := validMTU(sw.MTU, "switch "+sw.Name); err != nil {
 			return nil, err
 		}
 	}
@@ -115,7 +117,7 @@ func validate(c *Config) ([]string, error) {
 }
 
 func validateVM(c *Config, name string, vm *VM, macs map[string]string, ips map[netip.Addr]string) error {
-	if _, ok := c.Templates[vm.Template]; !ok {
+	if _, ok := c.LookupTemplate(vm.Template); !ok {
 		return fmt.Errorf("VM %q references unknown template %q", name, vm.Template)
 	}
 	if vm.MemoryMB < 128 {
@@ -149,7 +151,8 @@ func validateVM(c *Config, name string, vm *VM, macs map[string]string, ips map[
 	if vm.RootDisk.SizeGiB != nil && *vm.RootDisk.SizeGiB == 0 {
 		return fmt.Errorf("VM %q root disk size_gib must be positive", name)
 	}
-	for diskName, d := range vm.AdditionalDisks {
+	for _, d := range vm.AdditionalDisks {
+		diskName := d.Name
 		if err := named("disk", diskName); err != nil {
 			return err
 		}
@@ -182,7 +185,8 @@ func validateVM(c *Config, name string, vm *VM, macs map[string]string, ips map[
 	if len(vm.Interfaces) == 0 {
 		return fmt.Errorf("VM %q requires at least one interface", name)
 	}
-	for ifaceName, iface := range vm.Interfaces {
+	for _, iface := range vm.Interfaces {
+		ifaceName := iface.Name
 		if err := named("VM interface", ifaceName); err != nil {
 			return err
 		}
@@ -207,7 +211,8 @@ func validateVM(c *Config, name string, vm *VM, macs map[string]string, ips map[
 		if err := validateVMIPv4(iface.IPv4, name+"."+ifaceName, ips); err != nil {
 			return err
 		}
-		for id, vlan := range iface.VLANs {
+		for _, vlan := range iface.VLANs {
+			id := vlan.ID
 			if id < 1 || id > 4094 {
 				return fmt.Errorf("VM %q interface %q VLAN must be from 1 through 4094", name, ifaceName)
 			}
@@ -280,7 +285,8 @@ func validateRouter(name string, r *Router, macs map[string]string, ips map[neti
 	}
 	externals := 0
 	layers := map[string][]netip.Prefix{}
-	for ifaceName, iface := range r.Interfaces {
+	for _, iface := range r.Interfaces {
+		ifaceName := iface.Name
 		if !routerIface.MatchString(ifaceName) {
 			return 0, fmt.Errorf("router %q interface %q has an invalid name", name, ifaceName)
 		}
@@ -324,7 +330,8 @@ func validateRouter(name string, r *Router, macs map[string]string, ips map[neti
 				return 0, err
 			}
 		}
-		for id, vlan := range iface.VLANs {
+		for _, vlan := range iface.VLANs {
+			id := vlan.ID
 			if id < 1 || id > 4094 || len(fmt.Sprintf("%s.%d", ifaceName, id)) > 15 {
 				return 0, fmt.Errorf("router %q has invalid VLAN interface %s.%d", name, ifaceName, id)
 			}
@@ -426,7 +433,8 @@ func validateLinks(c *Config) ([]string, error) {
 	uses := map[string]int{}
 	ports := map[string]bool{}
 	var warnings []string
-	for linkName, link := range c.Links {
+	for _, link := range c.Links {
+		linkName := link.Name
 		if err := validMTU(link.MTU, "link "+linkName); err != nil {
 			return nil, err
 		}
@@ -447,7 +455,7 @@ func validateLinks(c *Config) ([]string, error) {
 			nodeMTU := 0
 			switch ep.Node {
 			case "management_host":
-				h, ok := c.ManagementHost.Interfaces[ep.Interface]
+				h, ok := c.LookupManagementHostInterface(ep.Interface)
 				if !ok {
 					return nil, fmt.Errorf("link %q references unknown management-host interface %q", linkName, ep.Interface)
 				}
@@ -457,8 +465,8 @@ func validateLinks(c *Config) ([]string, error) {
 				uses[where]++
 				nodeMTU = h.MTU
 			default:
-				if vm, ok := c.VMs[ep.Node]; ok {
-					iface, ok := vm.Interfaces[ep.Interface]
+				if vm, ok := c.LookupVM(ep.Node); ok {
+					iface, ok := c.LookupVMInterface(vm.Name, ep.Interface)
 					if !ok {
 						return nil, fmt.Errorf("link %q references unknown VM interface %s", linkName, where)
 					}
@@ -467,8 +475,8 @@ func validateLinks(c *Config) ([]string, error) {
 					}
 					uses[where]++
 					nodeMTU = iface.MTU
-				} else if r, ok := c.Routers[ep.Node]; ok {
-					iface, ok := r.Interfaces[ep.Interface]
+				} else if r, ok := c.LookupRouter(ep.Node); ok {
+					iface, ok := c.LookupRouterInterface(r.Name, ep.Interface)
 					if !ok {
 						return nil, fmt.Errorf("link %q references unknown router interface %s", linkName, where)
 					}
@@ -480,7 +488,7 @@ func validateLinks(c *Config) ([]string, error) {
 					}
 					uses[where]++
 					nodeMTU = iface.MTU
-				} else if sw, ok := c.Switches[ep.Node]; ok {
+				} else if sw, ok := c.LookupSwitch(ep.Node); ok {
 					if err := named("switch port", ep.Interface); err != nil {
 						return nil, err
 					}
@@ -507,26 +515,31 @@ func validateLinks(c *Config) ([]string, error) {
 				if peer == ep {
 					peer = link.Endpoints[1]
 				}
-				if _, ok := c.Switches[peer.Node]; ok && peer.Port != nil && peer.Port.Mode == "trunk" {
+				if _, ok := c.LookupSwitch(peer.Node); ok && peer.Port != nil && peer.Port.Mode == "trunk" {
 					return nil, fmt.Errorf("management-host endpoint on link %q may not connect to a switch trunk", linkName)
 				}
 			}
 		}
 	}
-	for name := range c.ManagementHost.Interfaces {
+	for _, iface := range c.ManagementHost.Interfaces {
+		name := iface.Name
 		if uses["management_host:"+name] != 1 {
 			return nil, fmt.Errorf("management-host interface %q must occur in exactly one link", name)
 		}
 	}
-	for node, vm := range c.VMs {
-		for name := range vm.Interfaces {
+	for _, vm := range c.VMs {
+		node := vm.Name
+		for _, iface := range vm.Interfaces {
+			name := iface.Name
 			if uses[node+":"+name] != 1 {
 				return nil, fmt.Errorf("VM interface %s:%s must occur in exactly one link", node, name)
 			}
 		}
 	}
-	for node, r := range c.Routers {
-		for name, iface := range r.Interfaces {
+	for _, r := range c.Routers {
+		node := r.Name
+		for _, iface := range r.Interfaces {
+			name := iface.Name
 			want := 1
 			if iface.External != nil {
 				want = 0
@@ -608,14 +621,6 @@ func oneOf(v string, values ...string) bool {
 	}
 	return false
 }
-func mapKeys[T any](m map[string]T) []string {
-	r := make([]string, 0, len(m))
-	for k := range m {
-		r = append(r, k)
-	}
-	return r
-}
-
 func validateKeys(keys []string, where string) error {
 	seen := map[string]bool{}
 	for _, key := range keys {

@@ -82,7 +82,7 @@ func (a *App) ps(ctx context.Context, cfg *config.Config, m *state.Manifest, arg
 			if len(paths) > 0 {
 				details += " datapath=" + strings.Join(paths, ",")
 			}
-			if vm := cfg.VMs[name]; vm != nil && vm.GuestAgent {
+			if vm, ok := cfg.LookupVM(name); ok && vm.GuestAgent {
 				probeCtx, cancel := context.WithTimeout(ctx, time.Second)
 				available := a.GuestAgentProbe(probeCtx, n.GuestAgentPath)
 				cancel()
@@ -258,7 +258,7 @@ func (a *App) counters(ctx context.Context, cfg *config.Config, m *state.Manifes
 	if len(names) > 0 {
 		selected := map[string]bool{}
 		for _, n := range names {
-			if _, ok := cfg.Links[n]; !ok {
+			if _, ok := cfg.LookupLink(n); !ok {
 				return fmt.Errorf("unknown link %q", n)
 			}
 			selected[n] = true
@@ -403,7 +403,7 @@ func (a *App) capture(ctx context.Context, cfg *config.Config, layout state.Layo
 	if err != nil {
 		return err
 	}
-	if _, ok := cfg.Links[o.link]; !ok {
+	if _, ok := cfg.LookupLink(o.link); !ok {
 		return fmt.Errorf("unknown link %q", o.link)
 	}
 	if m == nil {

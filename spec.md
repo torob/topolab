@@ -157,15 +157,18 @@ The top-level structure is:
 
 ```yaml
 name: example
-templates: {}
-management_host: {}
-vms: {}
-routers: {}
-switches: {}
-links: {}
+templates: []
+management_host: {interfaces: []}
+vms: []
+routers: []
+switches: []
+links: []
 ```
 
-`name` and all map keys used as resource names must match
+Every named collection is an ordered YAML list whose entries carry a `name`;
+VLAN entries carry an `id`. The former named-map syntax is not accepted.
+Missing collections normalize to `[]`. Null entries, missing identities, and
+duplicate names or VLAN IDs are errors. Entry names must match
 `^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$`. Names of VMs, routers, and switches share
 one global namespace and must be unique. The name `management_host` is
 reserved for the isolated controller endpoint and may not be used by a VM,
@@ -223,7 +226,8 @@ For example:
 
 ```yaml
 templates:
-  ubuntu: "${TEMPLATE_DIR:?TEMPLATE_DIR must be set}/ubuntu.qcow2"
+  - name: ubuntu
+    path: "${TEMPLATE_DIR:?TEMPLATE_DIR must be set}/ubuntu.qcow2"
 ```
 
 Environment variables are passed to the CLI in the normal way:
@@ -238,10 +242,11 @@ TEMPLATE_DIR=./templates \
 
 ```yaml
 templates:
-  ubuntu: ./templates/ubuntu.qcow2
+  - name: ubuntu
+    path: ./templates/ubuntu.qcow2
 ```
 
-`templates` maps each template name directly to a filesystem path. Relative
+Each `templates` entry contains a unique `name` and `path`. Relative
 paths are resolved against the directory containing the topology file. Each
 path must identify an existing regular file built separately from
 `topolab`.
@@ -267,14 +272,14 @@ topology's always-present management-host network namespace:
 ```yaml
 management_host:
   interfaces:
-    management:
+    - name: management
       mtu: 1500
       ipv4:
         addresses: [172.31.255.1/24]
 ```
 
-`management_host` accepts only an `interfaces` map and defaults to
-`{interfaces: {}}`. Each interface requires an `ipv4.addresses` list
+`management_host` accepts only an `interfaces` list and defaults to
+`{interfaces: []}`. Each interface requires an `ipv4.addresses` list
 containing one or more unique static IPv4 prefixes. Its optional `mtu`
 defaults to `1500`. DHCP, routes, VLAN subinterfaces, NAT, and `external` are
 not management-host-interface fields. Logical names use the resource-name
@@ -285,7 +290,7 @@ reserved node name `management_host`:
 
 ```yaml
 links:
-  management:
+  - name: management
     endpoints:
       - node: management_host
         interface: management
@@ -319,7 +324,7 @@ unowned process remains inside it.
 
 ```yaml
 vms:
-  web:
+  - name: web
     template: ubuntu
     cpu:
       model: host
@@ -334,7 +339,7 @@ vms:
       size_gib: 40
       bus: scsi
     additional_disks:
-      data:
+      - name: data
         size_gib: 100
         bus: scsi
     guest_agent: true
@@ -345,7 +350,7 @@ vms:
     ssh_authorized_keys:
       - ssh-ed25519 AAAA... operator@example
     interfaces:
-      eth0:
+      - name: eth0
         model: virtio
         queues: 2
         mac: "02:00:00:00:00:10"
@@ -460,15 +465,15 @@ subinterfaces:
 
 ```yaml
 vms:
-  app:
+  - name: app
     template: ubuntu
     interfaces:
-      trunk0:
+      - name: trunk0
         mtu: 1500
         ipv4:
           dhcp: false
         vlans:
-          10:
+          - id: 10
             mtu: 1500
             ipv4:
               addresses: [10.0.10.10/24]
@@ -530,7 +535,7 @@ the configured capacity applies to the VM's writable root overlay.
 defaults to `scsi` and must be one of `scsi`, `virtio`, `sata`, `nvme`, or
 `ide`.
 
-`additional_disks` is an optional map of additional writable data disks. Disk
+`additional_disks` is an optional ordered list of additional writable data disks. Disk
 names use the resource-name rules and must be unique within the VM. Each disk
 requires a positive `size_gib`; its optional `bus` has the same values and
 defaults as `root_disk.bus`. A newly declared disk is created as an empty
@@ -651,18 +656,18 @@ and layer-3 configuration independently from VMs.
 
 ```yaml
 routers:
-  edge:
+  - name: edge
     interfaces:
-      wan:
+      - name: wan
         mtu: 1500
         external:
           sources: [10.0.10.0/24]
           egress_interface: auto
           source_ip: auto
-      lan:
+      - name: lan
         mtu: 1500
         vlans:
-          10:
+          - id: 10
             mtu: 1500
             ipv4:
               addresses: [10.0.10.1/24]
@@ -697,7 +702,7 @@ router directly to the host without a `links` entry:
 
 ```yaml
 interfaces:
-  wan:
+  - name: wan
     mtu: 1500
     external:
       sources: [10.0.10.0/24, 10.0.20.0/24]
@@ -730,7 +735,7 @@ interface and must be referenced by exactly one link:
 
 ```yaml
 interfaces:
-  lan:
+  - name: lan
     mtu: 1500
     ipv4:
       addresses: [10.30.0.1/24]
@@ -803,16 +808,16 @@ object:
 
 ```yaml
 routers:
-  branch:
+  - name: branch
     interfaces:
-      wan:
+      - name: wan
         mtu: 1500
         ipv4:
           addresses: [10.20.0.2/24]
-      lan:
+      - name: lan
         mtu: 1500
         vlans:
-          20:
+          - id: 20
             mtu: 1500
             ipv4:
               addresses: [10.30.0.1/24]
@@ -843,7 +848,7 @@ through the generated host transit connection, so it may not declare another
 
 ```yaml
 switches:
-  lan:
+  - name: lan
     mtu: 1500
     stp: false
     vlan_filtering: true
@@ -862,7 +867,7 @@ endpoints, and a node cannot link to itself.
 
 ```yaml
 links:
-  web-lan:
+  - name: web-lan
     mtu: 1500
     endpoints:
       - node: web
@@ -1339,34 +1344,35 @@ set to one valid OpenSSH public key:
 name: smoke
 
 templates:
-  ubuntu: "${TOPOLOGY_TEST_TEMPLATE:?a test template is required}"
+  - name: ubuntu
+    path: "${TOPOLOGY_TEST_TEMPLATE:?a test template is required}"
 
 management_host:
   interfaces:
-    management:
+    - name: management
       mtu: 1500
       ipv4:
         addresses: [192.0.2.1/24]
 
 vms:
-  node:
+  - name: node
     template: ubuntu
     ssh_authorized_keys:
       - "${TOPOLOGY_TEST_SSH_KEY:?a test SSH public key is required}"
     interfaces:
-      management:
+      - name: management
         mtu: 1500
         ipv4:
           addresses: [192.0.2.10/24]
           dns_servers: [192.0.2.53]
 
 switches:
-  management:
+  - name: management
     mtu: 1500
     stp: true
 
 links:
-  management-host:
+  - name: management-host
     mtu: 1500
     endpoints:
       - node: management_host
@@ -1374,7 +1380,7 @@ links:
       - node: management
         interface: management-host
         port: {mode: access, vlan: 1}
-  node-management:
+  - name: node-management
     mtu: 1500
     endpoints:
       - node: node

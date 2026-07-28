@@ -61,8 +61,9 @@ func Load(opts LoadOptions) (*Result, error) {
 	return &Result{Config: cfg, WorkingDir: wd, Warnings: warnings}, nil
 }
 
-func validateTemplateFiles(templates map[string]string) error {
-	for name, path := range templates {
+func validateTemplateFiles(templates []*Template) error {
+	for _, template := range templates {
+		name, path := template.Name, template.Path
 		info, err := os.Stat(path)
 		if err != nil {
 			return fmt.Errorf("template %q: %w", name, err)
@@ -126,7 +127,6 @@ func Parse(data []byte, baseDir string, lookup func(string) (string, bool)) (*Co
 	if mappingValue(&doc, "host") != nil {
 		return nil, nil, errors.New("legacy top-level key \"host\" is no longer supported; rename it to \"management_host\" and run down before up for any active legacy topology")
 	}
-	order := collectOrder(&doc)
 	interpolated, err := yaml.Marshal(&doc)
 	if err != nil {
 		return nil, nil, fmt.Errorf("encode interpolated YAML: %w", err)
@@ -137,7 +137,9 @@ func Parse(data []byte, baseDir string, lookup func(string) (string, bool)) (*Co
 	if err := strict.Decode(&cfg); err != nil {
 		return nil, nil, fmt.Errorf("decode strict YAML: %w", err)
 	}
-	cfg.order = order
+	if err := buildIndexes(&cfg); err != nil {
+		return nil, nil, err
+	}
 	if err := validateDecoded(&cfg); err != nil {
 		return nil, nil, err
 	}
@@ -196,9 +198,10 @@ func resolveExistingPrefix(path string) (string, error) {
 
 func validateSocketPaths(wd string, cfg *Config) error {
 	const unixPathMax = 107
-	for name := range cfg.VMs {
+	for _, vm := range cfg.VMs {
+		name := vm.Name
 		sockets := []string{"qmp.sock", "serial.sock"}
-		if cfg.VMs[name].GuestAgent {
+		if vm.GuestAgent {
 			sockets = append(sockets, "guest-agent.sock")
 		}
 		for _, socket := range sockets {

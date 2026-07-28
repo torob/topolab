@@ -21,16 +21,16 @@ func (a *App) reconcileNamespaceHelpers(ctx context.Context, cfg *config.Config,
 		m.Helpers = map[string]*state.Helper{}
 	}
 	desired := map[string]*state.Helper{}
-	for _, routerName := range cfg.RouterNames() {
-		r := cfg.Routers[routerName]
+	for _, r := range cfg.Routers {
+		routerName := r.Name
 		namespace := ns.Namespaces[routerName]
-		for _, ifaceName := range cfg.RouterInterfaceNames(routerName) {
-			i := r.Interfaces[ifaceName]
+		for _, i := range r.Interfaces {
+			ifaceName := i.Name
 			if i.IPv4 != nil && i.IPv4.DHCPServer != nil {
 				addDNSMasqHelper(desired, layout, routerName, ifaceName, namespace)
 			}
-			for _, id := range cfg.RouterVLANIDs(routerName, ifaceName) {
-				v := i.VLANs[id]
+			for _, v := range i.VLANs {
+				id := v.ID
 				if v.IPv4 != nil && v.IPv4.DHCPServer != nil {
 					addDNSMasqHelper(desired, layout, routerName, ifaceName+"."+strconv.Itoa(id), namespace)
 				}
@@ -159,12 +159,16 @@ func addDNSMasqHelper(out map[string]*state.Helper, layout state.Layout, router,
 }
 
 func findDHCP(cfg *config.Config, router, logical string) *config.DHCPServer {
-	r := cfg.Routers[router]
-	if i := r.Interfaces[logical]; i != nil && i.IPv4 != nil {
+	r, ok := cfg.LookupRouter(router)
+	if !ok {
+		return nil
+	}
+	if i, ok := cfg.LookupRouterInterface(router, logical); ok && i.IPv4 != nil {
 		return i.IPv4.DHCPServer
 	}
-	for name, iface := range r.Interfaces {
-		for id, vlan := range iface.VLANs {
+	for _, iface := range r.Interfaces {
+		for _, vlan := range iface.VLANs {
+			name, id := iface.Name, vlan.ID
 			if logical == name+"."+strconv.Itoa(id) && vlan.IPv4 != nil {
 				return vlan.IPv4.DHCPServer
 			}

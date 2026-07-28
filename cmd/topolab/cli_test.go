@@ -16,9 +16,9 @@ func TestCLIConfigIsInjectableAndReadOnly(t *testing.T) {
 	file := filepath.Join(dir, "topology.yml")
 	doc := `name: cli
 routers:
-  edge:
+  - name: edge
     interfaces:
-      wan:
+      - name: wan
         external: {sources: [10.0.0.0/24]}
 `
 	if err := os.WriteFile(file, []byte(doc), 0600); err != nil {
@@ -46,7 +46,7 @@ routers:
 func TestCLIRegistersRuntimeCommandsAndRequiresRoot(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "topology.yml")
-	if err := os.WriteFile(file, []byte("name: x\nrouters: {r: {interfaces: {e: {external: {sources: [10.0.0.0/24]}}}}}\n"), 0600); err != nil {
+	if err := os.WriteFile(file, []byte("name: x\nrouters: [{name: r, interfaces: [{name: e, external: {sources: [10.0.0.0/24]}}]}]\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	for _, command := range []string{"up", "ps", "logs", "capture", "counters", "start", "stop", "restart", "down", "exec"} {
@@ -67,7 +67,7 @@ func (r exitRuntime) Run(context.Context, RuntimeCommand) error {
 func TestCLIPropagatesExactChildExitCode(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "topology.yml")
-	if err := os.WriteFile(file, []byte("name: x\nrouters: {r: {interfaces: {e: {external: {sources: [10.0.0.0/24]}}}}}\n"), 0600); err != nil {
+	if err := os.WriteFile(file, []byte("name: x\nrouters: [{name: r, interfaces: [{name: e, external: {sources: [10.0.0.0/24]}}]}]\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	cli := CLI{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}, EUID: func() int { return 0 }, Runtime: exitRuntime{code: 42}}

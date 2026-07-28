@@ -481,7 +481,11 @@ func (a *App) validateTemplates(ctx context.Context, cfg *config.Config) (map[st
 	}
 	out := map[string]qemu.TemplateInfo{}
 	for name := range used {
-		info, err := a.Images.ValidateTemplate(ctx, cfg.Templates[name])
+		template, ok := cfg.LookupTemplate(name)
+		if !ok {
+			return nil, fmt.Errorf("template %s is missing", name)
+		}
+		info, err := a.Images.ValidateTemplate(ctx, template.Path)
 		if err != nil {
 			return nil, fmt.Errorf("template %s: %w", name, err)
 		}

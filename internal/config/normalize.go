@@ -14,8 +14,9 @@ func normalize(c *Config, baseDir string) error {
 	if err != nil {
 		return fmt.Errorf("resolve topology directory: %w", err)
 	}
-	ensureMaps(c)
-	for name, path := range c.Templates {
+	ensureSlices(c)
+	for _, template := range c.Templates {
+		name, path := template.Name, template.Path
 		if !filepath.IsAbs(path) {
 			path = filepath.Join(absBase, path)
 		}
@@ -23,13 +24,10 @@ func normalize(c *Config, baseDir string) error {
 		if err != nil {
 			return fmt.Errorf("template %q: resolve path: %w", name, err)
 		}
-		c.Templates[name] = filepath.Clean(path)
+		template.Path = filepath.Clean(path)
 	}
-	for name, h := range c.ManagementHost.Interfaces {
-		if h == nil {
-			h = &ManagementHostInterface{}
-			c.ManagementHost.Interfaces[name] = h
-		}
+	for _, h := range c.ManagementHost.Interfaces {
+		name := h.Name
 		if h.MTU == 0 {
 			h.MTU = 1500
 		}
@@ -38,11 +36,8 @@ func normalize(c *Config, baseDir string) error {
 			h.IPv4.Addresses = []string{}
 		}
 	}
-	for name, vm := range c.VMs {
-		if vm == nil {
-			vm = &VM{}
-			c.VMs[name] = vm
-		}
+	for _, vm := range c.VMs {
+		name := vm.Name
 		if vm.MemoryMB == 0 {
 			vm.MemoryMB = 2048
 		}
@@ -73,13 +68,9 @@ func normalize(c *Config, baseDir string) error {
 			vm.RootDisk.Bus = "scsi"
 		}
 		if vm.AdditionalDisks == nil {
-			vm.AdditionalDisks = map[string]*Disk{}
+			vm.AdditionalDisks = []*Disk{}
 		}
-		for diskName, disk := range vm.AdditionalDisks {
-			if disk == nil {
-				disk = &Disk{}
-				vm.AdditionalDisks[diskName] = disk
-			}
+		for _, disk := range vm.AdditionalDisks {
 			if disk.Bus == "" {
 				disk.Bus = "scsi"
 			}
@@ -91,41 +82,30 @@ func normalize(c *Config, baseDir string) error {
 			vm.SSHAuthorizedKeys = []string{}
 		}
 		if vm.Interfaces == nil {
-			vm.Interfaces = map[string]*VMInterface{}
+			vm.Interfaces = []*VMInterface{}
 		}
-		for ifaceName, iface := range vm.Interfaces {
-			normalizeVMInterface(c.Name, name, ifaceName, iface, vm.Interfaces)
+		for _, iface := range vm.Interfaces {
+			normalizeVMInterface(c.Name, name, iface.Name, iface)
 		}
 	}
-	for name, r := range c.Routers {
-		if r == nil {
-			r = &Router{}
-			c.Routers[name] = r
-		}
+	for _, r := range c.Routers {
+		name := r.Name
 		if r.Interfaces == nil {
-			r.Interfaces = map[string]*RouterInterface{}
+			r.Interfaces = []*RouterInterface{}
 		}
 		if r.Routes == nil {
 			r.Routes = []RouterRoute{}
 		}
-		for ifaceName, iface := range r.Interfaces {
-			normalizeRouterInterface(c.Name, name, ifaceName, iface, r.Interfaces)
+		for _, iface := range r.Interfaces {
+			normalizeRouterInterface(c.Name, name, iface.Name, iface)
 		}
 	}
-	for name, sw := range c.Switches {
-		if sw == nil {
-			sw = &Switch{}
-			c.Switches[name] = sw
-		}
+	for _, sw := range c.Switches {
 		if sw.MTU == 0 {
 			sw.MTU = 1500
 		}
 	}
-	for name, link := range c.Links {
-		if link == nil {
-			link = &Link{}
-			c.Links[name] = link
-		}
+	for _, link := range c.Links {
 		if link.MTU == 0 {
 			link.MTU = 1500
 		}
@@ -136,7 +116,7 @@ func normalize(c *Config, baseDir string) error {
 			if ep == nil {
 				continue
 			}
-			if _, ok := c.Switches[ep.Node]; ok {
+			if _, ok := c.LookupSwitch(ep.Node); ok {
 				if ep.Port == nil {
 					vlan := 1
 					ep.Port = &Port{Mode: "access", VLAN: &vlan}
@@ -151,7 +131,8 @@ func normalize(c *Config, baseDir string) error {
 			}
 		}
 	}
-	for name, path := range c.Templates {
+	for _, template := range c.Templates {
+		name, path := template.Name, template.Path
 		info, err := os.Stat(path)
 		if err != nil {
 			return fmt.Errorf("template %q path %q: %w", name, path, err)
@@ -163,32 +144,28 @@ func normalize(c *Config, baseDir string) error {
 	return nil
 }
 
-func ensureMaps(c *Config) {
+func ensureSlices(c *Config) {
 	if c.Templates == nil {
-		c.Templates = map[string]string{}
+		c.Templates = []*Template{}
 	}
 	if c.ManagementHost.Interfaces == nil {
-		c.ManagementHost.Interfaces = map[string]*ManagementHostInterface{}
+		c.ManagementHost.Interfaces = []*ManagementHostInterface{}
 	}
 	if c.VMs == nil {
-		c.VMs = map[string]*VM{}
+		c.VMs = []*VM{}
 	}
 	if c.Routers == nil {
-		c.Routers = map[string]*Router{}
+		c.Routers = []*Router{}
 	}
 	if c.Switches == nil {
-		c.Switches = map[string]*Switch{}
+		c.Switches = []*Switch{}
 	}
 	if c.Links == nil {
-		c.Links = map[string]*Link{}
+		c.Links = []*Link{}
 	}
 }
 
-func normalizeVMInterface(topology, node, name string, iface *VMInterface, all map[string]*VMInterface) {
-	if iface == nil {
-		iface = &VMInterface{}
-		all[name] = iface
-	}
+func normalizeVMInterface(topology, node, name string, iface *VMInterface) {
 	if iface.Model == "" {
 		iface.Model = "virtio"
 	}
@@ -202,14 +179,10 @@ func normalizeVMInterface(topology, node, name string, iface *VMInterface, all m
 		iface.MTU = 1500
 	}
 	if iface.VLANs == nil {
-		iface.VLANs = map[int]*VMVLAN{}
+		iface.VLANs = []*VMVLAN{}
 	}
 	normalizeVMIPv4(iface.IPv4)
-	for id, vlan := range iface.VLANs {
-		if vlan == nil {
-			vlan = &VMVLAN{}
-			iface.VLANs[id] = vlan
-		}
+	for _, vlan := range iface.VLANs {
 		if vlan.MTU == 0 {
 			vlan.MTU = iface.MTU
 		}
@@ -232,11 +205,7 @@ func normalizeVMIPv4(ip *VMIPv4) {
 	}
 }
 
-func normalizeRouterInterface(topology, node, name string, iface *RouterInterface, all map[string]*RouterInterface) {
-	if iface == nil {
-		iface = &RouterInterface{}
-		all[name] = iface
-	}
+func normalizeRouterInterface(topology, node, name string, iface *RouterInterface) {
 	if iface.MAC == "" {
 		iface.MAC = DeterministicMAC(topology, node, name)
 	}
@@ -244,14 +213,10 @@ func normalizeRouterInterface(topology, node, name string, iface *RouterInterfac
 		iface.MTU = 1500
 	}
 	if iface.VLANs == nil {
-		iface.VLANs = map[int]*RouterVLAN{}
+		iface.VLANs = []*RouterVLAN{}
 	}
 	normalizeRouterIPv4(iface.IPv4)
-	for id, vlan := range iface.VLANs {
-		if vlan == nil {
-			vlan = &RouterVLAN{}
-			iface.VLANs[id] = vlan
-		}
+	for _, vlan := range iface.VLANs {
 		if vlan.MTU == 0 {
 			vlan.MTU = iface.MTU
 		}

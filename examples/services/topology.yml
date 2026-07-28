@@ -1,100 +1,101 @@
 name: services
 
 templates:
-  ubuntu-26.04: "${TOPOLAB_TEMPLATE:?set TOPOLAB_TEMPLATE to an Ubuntu 26.04 amd64 cloud image}"
+  - name: ubuntu-26.04
+    path: "${TOPOLAB_TEMPLATE:?set TOPOLAB_TEMPLATE to an Ubuntu 26.04 amd64 cloud image}"
 
 management_host:
   interfaces:
-    admin:
+    - name: admin
       ipv4:
         addresses: [10.50.10.254/24]
 
 vms:
-  application:
+  - name: application
     template: ubuntu-26.04
     ssh_authorized_keys:
       - "${TOPOLAB_SSH_PUBLIC_KEY:?set TOPOLAB_SSH_PUBLIC_KEY to an OpenSSH public key}"
     interfaces:
-      trunk:
+      - name: trunk
         vlans:
-          10:
+          - id: 10
             ipv4: {dhcp: true}
-          20:
+          - id: 20
             ipv4: {dhcp: true}
-  database:
+  - name: database
     template: ubuntu-26.04
     ssh_authorized_keys:
       - "${TOPOLAB_SSH_PUBLIC_KEY:?set TOPOLAB_SSH_PUBLIC_KEY to an OpenSSH public key}"
     interfaces:
-      trunk:
+      - name: trunk
         vlans:
-          20:
+          - id: 20
             ipv4: {dhcp: true}
 
 routers:
-  services:
+  - name: services
     interfaces:
-      trunk:
+      - name: trunk
         vlans:
-          10:
+          - id: 10
             ipv4:
               addresses: [10.50.10.1/24]
               dhcp_server:
                 range_start: 10.50.10.100
                 range_end: 10.50.10.149
                 dns_servers: [1.1.1.1]
-          20:
+          - id: 20
             ipv4:
               addresses: [10.50.20.1/24]
               dhcp_server:
                 range_start: 10.50.20.100
                 range_end: 10.50.20.149
                 dns_servers: [1.1.1.1]
-      uplink:
+      - name: uplink
         ipv4:
           addresses: [198.18.0.2/30]
         nat:
           sources: [10.50.10.0/24, 10.50.20.0/24]
     routes:
       - {to: default, via: 198.18.0.1, interface: uplink}
-  edge:
+  - name: edge
     interfaces:
-      inside:
+      - name: inside
         ipv4:
           addresses: [198.18.0.1/30]
-      external:
+      - name: external
         external:
           sources: [198.18.0.0/30]
           egress_interface: auto
           source_ip: auto
 
 switches:
-  service-switch:
+  - name: service-switch
     vlan_filtering: true
-  uplink-switch: {}
+  - name: uplink-switch
 
 links:
-  application-service:
+  - name: application-service
     endpoints:
       - {node: application, interface: trunk}
       - {node: service-switch, interface: application, port: {mode: trunk, allowed_vlans: [10, 20]}}
-  database-service:
+  - name: database-service
     endpoints:
       - {node: database, interface: trunk}
       - {node: service-switch, interface: database, port: {mode: trunk, allowed_vlans: [20]}}
-  router-service:
+  - name: router-service
     endpoints:
       - {node: services, interface: trunk}
       - {node: service-switch, interface: router, port: {mode: trunk, allowed_vlans: [10, 20]}}
-  management-service:
+  - name: management-service
     endpoints:
       - {node: management_host, interface: admin}
       - {node: service-switch, interface: management, port: {mode: access, vlan: 10}}
-  services-uplink:
+  - name: services-uplink
     endpoints:
       - {node: services, interface: uplink}
       - {node: uplink-switch, interface: services}
-  edge-uplink:
+  - name: edge-uplink
     endpoints:
       - {node: edge, interface: inside}
       - {node: uplink-switch, interface: edge}
