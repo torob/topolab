@@ -107,6 +107,9 @@ func renderNetwork(n Network) ([]byte, error) {
 		b.WriteString("  " + quote(iface.Name) + ":\n")
 		b.WriteString("    match:\n      macaddress: " + quote(strings.ToLower(iface.MAC)) + "\n")
 		b.WriteString("    set-name: " + quote(iface.Name) + "\n")
+		if iface.IPv4 == nil && len(iface.VLANs) == 0 {
+			b.WriteString("    optional: true\n")
+		}
 		if iface.MTU > 0 {
 			fmt.Fprintf(&b, "    mtu: %d\n", iface.MTU)
 		}

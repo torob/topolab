@@ -33,6 +33,44 @@ func TestRenderDeterministicNoCloud(t *testing.T) {
 	}
 }
 
+func TestRenderNetworkOptionalInterfaces(t *testing.T) {
+	tests := []struct {
+		name     string
+		iface    Interface
+		optional bool
+	}{
+		{
+			name:     "layer 2 only",
+			iface:    Interface{Name: "legacy", MAC: "02:00:00:00:00:01"},
+			optional: true,
+		},
+		{
+			name:  "static IPv4",
+			iface: Interface{Name: "static", MAC: "02:00:00:00:00:02", IPv4: &IPv4{Addresses: []string{"192.0.2.10/24"}}},
+		},
+		{
+			name:  "DHCP",
+			iface: Interface{Name: "dhcp", MAC: "02:00:00:00:00:03", IPv4: &IPv4{DHCP: true}},
+		},
+		{
+			name:  "VLAN parent",
+			iface: Interface{Name: "trunk", MAC: "02:00:00:00:00:04", VLANs: []VLAN{{ID: 10}}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			network, err := renderNetwork(Network{Interfaces: []Interface{tt.iface}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := strings.Contains(string(network), "    optional: true\n")
+			if got != tt.optional {
+				t.Fatalf("optional = %t, want %t in:\n%s", got, tt.optional, network)
+			}
+		})
+	}
+}
+
 func TestInstanceIDChangesWithGuestIdentity(t *testing.T) {
 	a := InstanceID("lab", "vm", "storage", "a")
 	b := InstanceID("lab", "vm", "storage", "b")
