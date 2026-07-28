@@ -21,8 +21,10 @@ go install github.com/torob/topolab/cmd/topolab@latest
 To build from a checkout:
 
 ```sh
-go build -o bin/topolab ./cmd/topolab
+make build
 ```
+
+This produces a stripped, statically linked binary at `bin/topolab`.
 
 ## Host requirements
 
@@ -81,12 +83,15 @@ run `down` with the new binary before the next `up`.
 Run the local checks with:
 
 ```sh
-go test ./...
-go test -race ./...
-go vet ./...
+make test
+make test-race
+make vet
 python3 -m py_compile e2e/common.py e2e/*/test.py
 sh -n e2e/routed/gateway-router.sh
 ```
+
+The race target requires a C compiler and also produces a race-instrumented
+binary at `bin/topolab-race` for interactive diagnostics.
 
 Full E2E execution is deliberately direct and opt-in because it requires root,
 KVM, QEMU/OVMF, host networking tools, OpenSSH, and (for VM suites) Internet

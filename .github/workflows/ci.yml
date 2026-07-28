@@ -34,16 +34,25 @@ jobs:
           }
 
       - name: Run unit tests
-        run: go test ./...
+        run: make test
 
       - name: Run race tests
-        run: go test -race ./...
+        run: make test-race
 
       - name: Run vet
-        run: go vet ./...
+        run: make vet
 
       - name: Build
-        run: go build -o "$RUNNER_TEMP/topolab" ./cmd/topolab
+        run: |
+          make build
+          artifact=$(file bin/topolab)
+          build_info=$(go version -m bin/topolab)
+          printf '%s\n' "$artifact"
+          printf '%s\n' "$build_info"
+          grep -F 'statically linked' <<<"$artifact"
+          grep -F 'stripped' <<<"$artifact"
+          grep -F 'CGO_ENABLED=0' <<<"$build_info"
+          grep -F -- '-trimpath=true' <<<"$build_info"
 
       - name: Check Python syntax
         run: python3 -m py_compile $(find e2e -type f -name '*.py' -print)
@@ -61,7 +70,7 @@ jobs:
           export TOPOLAB_TEMPLATE="$RUNNER_TEMP/placeholder.qcow2"
           export TOPOLAB_SSH_PUBLIC_KEY="$(cat "$RUNNER_TEMP/example-key.pub")"
           for topology in examples/*/topology.yml; do
-            "$RUNNER_TEMP/topolab" --file "$topology" \
+            ./bin/topolab --file "$topology" \
               --working-dir "$RUNNER_TEMP/config" config >/dev/null
           done
 
