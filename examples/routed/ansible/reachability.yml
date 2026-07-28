@@ -1,0 +1,11 @@
+---
+- name: Verify synthetic routed-lab controller access
+  hosts: managed_nodes
+  gather_facts: false
+  tasks:
+    - name: Wait for SSH
+      ansible.builtin.wait_for_connection:
+        timeout: 120
+    - name: Verify direct command execution
+      ansible.builtin.command: /usr/bin/true
+      changed_when: false

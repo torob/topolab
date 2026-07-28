@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify dependencies
+        run: go mod verify
+
+      - name: Check formatting
+        run: |
+          unformatted=$(find . -type f -name '*.go' -print0 | xargs -0 gofmt -l)
+          test -z "$unformatted" || {
+            printf 'Files need gofmt:\n%s\n' "$unformatted"
+            exit 1
+          }
+
+      - name: Run unit tests
+        run: go test ./...
+
+      - name: Run race tests
+        run: go test -race ./...
+
+      - name: Run vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build -o "$RUNNER_TEMP/topolab" ./cmd/topolab
+
+      - name: Check shell syntax
+        run: find examples hack -type f -name '*.sh' -exec sh -n {} +
+
+      - name: Run ShellCheck
+        run: find examples hack -type f -name '*.sh' -print0 | xargs -0 shellcheck --severity=warning --shell=sh
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.5.0
+
+      - name: Check for reachable vulnerabilities
+        run: govulncheck ./...

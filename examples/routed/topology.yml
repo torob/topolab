@@ -1,0 +1,106 @@
+name: routed
+
+templates:
+  ubuntu-26.04: "${TOPOLAB_TEMPLATE:?set TOPOLAB_TEMPLATE to the Ubuntu 26.04 qcow2 template}"
+
+management_host:
+  interfaces:
+    service:
+      ipv4:
+        addresses: [192.0.2.254/24]
+
+vms:
+  gateway:
+    template: ubuntu-26.04
+    cpu: {model: host, sockets: 1, cores: 2, threads: 1}
+    memory_mb: 2048
+    guest_agent: true
+    ssh_authorized_keys:
+      - "${ROUTED_SSH_PUBLIC_KEY:?set ROUTED_SSH_PUBLIC_KEY to the ephemeral acceptance key}"
+    interfaces:
+      service:
+        queues: 2
+        ipv4:
+          addresses: [192.0.2.1/24]
+      transit:
+        queues: 2
+        ipv4:
+          addresses: [198.51.100.2/30]
+          routes:
+            - {to: default, via: 198.51.100.1}
+          dns_servers: [1.1.1.1]
+  application:
+    template: ubuntu-26.04
+    ssh_authorized_keys:
+      - "${ROUTED_SSH_PUBLIC_KEY:?set ROUTED_SSH_PUBLIC_KEY to the ephemeral acceptance key}"
+    interfaces:
+      service:
+        ipv4:
+          addresses: [192.0.2.10/24]
+          routes: [{to: default, via: 192.0.2.1}]
+          dns_servers: [1.1.1.1]
+  client:
+    template: ubuntu-26.04
+    ssh_authorized_keys:
+      - "${ROUTED_SSH_PUBLIC_KEY:?set ROUTED_SSH_PUBLIC_KEY to the ephemeral acceptance key}"
+    interfaces:
+      client:
+        ipv4:
+          addresses: [203.0.113.10/24]
+          routes: [{to: default, via: 203.0.113.1}]
+          dns_servers: [1.1.1.1]
+
+routers:
+  edge:
+    interfaces:
+      transit:
+        ipv4:
+          addresses: [198.51.100.1/30]
+      client:
+        ipv4:
+          addresses: [203.0.113.1/24]
+      external:
+        external:
+          sources: [198.51.100.0/30, 203.0.113.0/24]
+          egress_interface: auto
+          source_ip: auto
+    routes:
+      - {to: 192.0.2.0/24, via: 198.51.100.2, interface: transit}
+
+switches:
+  service-net:
+    mtu: 1500
+  transit-net:
+    mtu: 1500
+  client-net:
+    mtu: 1500
+
+links:
+  management-service:
+    endpoints:
+      - {node: management_host, interface: service}
+      - {node: service-net, interface: management-host}
+  gateway-service:
+    endpoints:
+      - {node: gateway, interface: service}
+      - {node: service-net, interface: gateway}
+  application-service:
+    endpoints:
+      - {node: application, interface: service}
+      - {node: service-net, interface: application}
+  gateway-transit:
+    endpoints:
+      - {node: gateway, interface: transit}
+      - {node: transit-net, interface: gateway}
+  edge-transit:
+    endpoints:
+      - {node: edge, interface: transit}
+      - {node: transit-net, interface: edge}
+  edge-client:
+    endpoints:
+      - {node: edge, interface: client}
+      - {node: client-net, interface: edge}
+  client-access:
+    endpoints:
+      - {node: client, interface: client}
+      - {node: client-net, interface: client}

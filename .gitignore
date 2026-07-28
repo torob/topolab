@@ -1,0 +1,9 @@
+/bin/
+/topolab
+/coverage.out
+/.topolab/
+/captures/
+*.test
+*.pcapng
+*.qcow2
+*.iso

@@ -1,0 +1,809 @@
+// Package app integrates TopoLab's configuration, state, host networking,
+// storage, QEMU and observability packages into the public command lifecycle.
+package app
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"slices"
+	"time"
+
+	"github.com/torob/topolab/internal/cloudinit"
+	"github.com/torob/topolab/internal/config"
+	"github.com/torob/topolab/internal/network"
+	"github.com/torob/topolab/internal/observability"
+	"github.com/torob/topolab/internal/preflight"
+	"github.com/torob/topolab/internal/qemu"
+	"github.com/torob/topolab/internal/state"
+)
+
+const (
+	ovmfCode = "/usr/share/OVMF/OVMF_CODE_4M.fd"
+	ovmfVars = "/usr/share/OVMF/OVMF_VARS_4M.fd"
+)
+
+type Command struct {
+	Name       string
+	Args       []string
+	Topology   *config.Config
+	WorkingDir string
+}
+
+type imageManager interface {
+	ValidateTemplate(context.Context, string) (qemu.TemplateInfo, error)
+	Info(context.Context, string) (qemu.ImageInfo, error)
+	CreateOverlay(context.Context, string, qemu.TemplateInfo, uint64) error
+	CreateDataDisk(context.Context, string, uint64) error
+	ResizeOffline(context.Context, qemu.Growth) error
+	ResizeOnline(context.Context, qemu.BlockResizer, qemu.Growth) error
+}
+type seedBuilder interface {
+	Build(context.Context, string, cloudinit.Seed) error
+}
+type processStopper interface {
+	Stop(context.Context, int, string, string, string) error
+}
+type qmpClient interface {
+	qemu.BlockResizer
+	Balloon(context.Context, uint64) error
+	QueryBalloon(context.Context) (uint64, error)
+	QueryStatus(context.Context) (string, error)
+	Close() error
+}
+
+type App struct {
+	Stdin           io.Reader
+	Stdout, Stderr  io.Writer
+	Network         network.HostNetwork
+	Images          imageManager
+	Seeds           seedBuilder
+	QEMUBuilder     *qemu.Builder
+	StartProcess    func([]string, []*os.File) (*qemu.StartedProcess, error)
+	Namespaces      network.NamespaceOps
+	Stopper         processStopper
+	Processes       qemu.ProcessOps
+	Preflight       func(preflight.Options) error
+	OpenQMP         func(string) qmpClient
+	Now             func() time.Time
+	Executable      func() (string, error)
+	VhostAvailable  func() bool
+	GuestAgentProbe func(context.Context, string) bool
+}
+
+func New(stdout, stderr io.Writer) *App {
+	return &App{Stdout: stdout, Stderr: stderr}
+}
+
+func (a *App) defaults() {
+	if a.Stdin == nil {
+		a.Stdin = os.Stdin
+	}
+	if a.Stdout == nil {
+		a.Stdout = io.Discard
+	}
+	if a.Stderr == nil {
+		a.Stderr = io.Discard
+	}
+	if a.Network == nil {
+		a.Network = network.New(nil, network.Options{})
+	}
+	if a.Images == nil {
+		a.Images = qemu.NewImageManager(nil, "")
+	}
+	if a.Seeds == nil {
+		a.Seeds = cloudinit.NewISOBuilder(nil, "")
+	}
+	if a.QEMUBuilder == nil {
+		a.QEMUBuilder = qemu.NewBuilder("")
+	}
+	if a.StartProcess == nil {
+		a.StartProcess = qemu.Start
+	}
+	if a.Namespaces == nil {
+		a.Namespaces = network.OSNamespaceOps{}
+	}
+	if a.Stopper == nil {
+		a.Stopper = qemu.NewStopper()
+	}
+	if a.Processes == nil {
+		a.Processes = qemu.OSProcessOps{}
+	}
+	if a.Preflight == nil {
+		a.Preflight = preflight.Runtime
+	}
+	if a.OpenQMP == nil {
+		a.OpenQMP = func(path string) qmpClient { return qemu.NewQMPClient(path, nil) }
+	}
+	if a.Now == nil {
+		a.Now = time.Now
+	}
+	if a.Executable == nil {
+		a.Executable = os.Executable
+	}
+	if a.VhostAvailable == nil {
+		a.VhostAvailable = vhostNetAvailable
+	}
+	if a.GuestAgentProbe == nil {
+		a.GuestAgentProbe = qemu.GuestAgentAvailable
+	}
+}
+
+func (a *App) Run(ctx context.Context, command Command) error {
+	a.defaults()
+	if command.Topology == nil {
+		return errors.New("nil topology")
+	}
+	layout, err := state.NewLayout(command.WorkingDir, command.Topology.Name)
+	if err != nil {
+		return err
+	}
+	switch command.Name {
+	case "ps", "logs", "capture", "counters":
+		m, err := state.Load(layout.ManifestPath)
+		if err != nil {
+			return err
+		}
+		if err := validateManifestPaths(layout, m); err != nil {
+			return err
+		}
+		if networkState, err := manifestNetwork(m); err != nil {
+			return err
+		} else if err := validateManifestNetwork(layout, networkState); err != nil {
+			return err
+		}
+		return a.runRead(ctx, command, layout, m)
+	case "exec":
+		m, err := state.Load(layout.ManifestPath)
+		if err != nil {
+			return err
+		}
+		if err := validateManifestPaths(layout, m); err != nil {
+			return err
+		}
+		return a.runExec(ctx, layout, m, command.Args)
+	case "up", "start", "stop", "restart", "down":
+		// A missing down is genuinely read-only and idempotent. Start/stop also
+		// report absence without manufacturing an empty topology directory.
+		if command.Name != "up" {
+			m, err := state.Load(layout.ManifestPath)
+			if err != nil {
+				return err
+			}
+			if m == nil {
+				if command.Name == "down" {
+					return nil
+				}
+				return errors.New("topology is not up")
+			}
+		}
+		if command.Name == "up" || command.Name == "start" || command.Name == "restart" {
+			if err := a.runtimePreflight(command.Topology); err != nil {
+				return err
+			}
+		}
+		if err := layout.Ensure(); err != nil {
+			return err
+		}
+		lock, err := state.AcquireLock(ctx, layout.LockPath)
+		if err != nil {
+			return err
+		}
+		defer lock.Close()
+		m, err := state.Load(layout.ManifestPath)
+		if err != nil {
+			return err
+		}
+		if command.Name == "up" && m != nil && m.DatapathVersion < network.DatapathVersion {
+			return errors.New("active topology uses the legacy root datapath; run topolab down before up")
+		}
+		if err := validateManifestPaths(layout, m); err != nil {
+			return err
+		}
+		if networkState, err := manifestNetwork(m); err != nil {
+			return err
+		} else if err := validateManifestNetwork(layout, networkState); err != nil {
+			return err
+		}
+		switch command.Name {
+		case "up":
+			return a.up(ctx, command.Topology, layout, m)
+		case "start":
+			return a.start(ctx, command.Topology, layout, m, command.Args)
+		case "stop":
+			return a.stop(ctx, command.Topology, layout, m, command.Args)
+		case "restart":
+			return a.restart(ctx, command.Topology, layout, m, command.Args)
+		case "down":
+			if err := a.down(ctx, command.Topology, layout, m); err != nil {
+				return err
+			}
+			return removeEmptyTopologyDirs(layout, m)
+		}
+	}
+	return fmt.Errorf("unknown runtime command %q", command.Name)
+}
+
+func (a *App) runtimePreflight(cfg *config.Config) error {
+	needsDNS := false
+	cpuModels := map[string]bool{}
+	deviceModels := map[string]bool{"ide-cd": len(cfg.VMs) > 0}
+	nicDevice := map[string]string{"virtio": "virtio-net-pci", "e1000e": "e1000e", "e1000": "e1000", "igb": "igb", "rtl8139": "rtl8139", "vmxnet3": "vmxnet3"}
+	diskDevices := map[string][]string{"scsi": {"virtio-scsi-pci", "scsi-hd"}, "virtio": {"virtio-blk-pci"}, "sata": {"ich9-ahci", "ide-hd"}, "ide": {"piix3-ide", "ide-hd"}, "nvme": {"nvme"}}
+	cpuPlans := map[string]preflight.CPUPlan{}
+	for _, vm := range cfg.VMs {
+		cpuModels[vm.CPU.Model] = true
+		plan := preflight.CPUPlan{Model: vm.CPU.Model, Sockets: *vm.CPU.Sockets, Cores: *vm.CPU.Cores, Threads: *vm.CPU.Threads}
+		cpuPlans[fmt.Sprintf("%s/%d/%d/%d", plan.Model, plan.Sockets, plan.Cores, plan.Threads)] = plan
+		if vm.MemoryBalloon.Enabled {
+			deviceModels["virtio-balloon-pci"] = true
+		}
+		if vm.GuestAgent {
+			deviceModels["virtio-serial-pci"] = true
+			deviceModels["virtserialport"] = true
+		}
+		for _, iface := range vm.Interfaces {
+			deviceModels[nicDevice[iface.Model]] = true
+		}
+		for _, model := range diskDevices[vm.RootDisk.Bus] {
+			deviceModels[model] = true
+		}
+		for _, disk := range vm.AdditionalDisks {
+			for _, model := range diskDevices[disk.Bus] {
+				deviceModels[model] = true
+			}
+		}
+	}
+	for _, r := range cfg.Routers {
+		for _, in := range r.Interfaces {
+			if in.IPv4 != nil && in.IPv4.DHCPServer != nil {
+				needsDNS = true
+			}
+			for _, v := range in.VLANs {
+				if v.IPv4 != nil && v.IPv4.DHCPServer != nil {
+					needsDNS = true
+				}
+			}
+		}
+	}
+	var cpus, devices []string
+	var plans []preflight.CPUPlan
+	for model := range cpuModels {
+		cpus = append(cpus, model)
+	}
+	for model, needed := range deviceModels {
+		if needed && model != "" {
+			devices = append(devices, model)
+		}
+	}
+	slices.Sort(cpus)
+	slices.Sort(devices)
+	planKeys := make([]string, 0, len(cpuPlans))
+	for key := range cpuPlans {
+		planKeys = append(planKeys, key)
+	}
+	slices.Sort(planKeys)
+	for _, key := range planKeys {
+		plans = append(plans, cpuPlans[key])
+	}
+	return a.Preflight(preflight.Options{NeedsDNSMasq: needsDNS, RequireFirmware: len(cfg.VMs) > 0, CPUModels: cpus, DeviceModels: devices, CPUPlans: plans})
+}
+
+func (a *App) up(ctx context.Context, cfg *config.Config, layout state.Layout, old *state.Manifest) error {
+	if old != nil && old.Topology != cfg.Name {
+		return fmt.Errorf("manifest belongs to topology %q", old.Topology)
+	}
+
+	templates, err := a.validateTemplates(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	netCfg := translateNetwork(cfg, layout.SharedDir, oldNetwork(old))
+	plan, err := a.Network.Plan(ctx, netCfg)
+	if err != nil {
+		return err
+	}
+	configHash, _ := state.Hash(cfg)
+	networkHash, _ := state.Hash(canonicalNetworkConfig(netCfg, plan.External))
+	desired, err := a.desiredNodes(cfg, layout, templates)
+	if err != nil {
+		return err
+	}
+	if err := a.validateNodePlans(cfg, desired, netCfg); err != nil {
+		return err
+	}
+	if err := a.validateExisting(ctx, old, desired); err != nil {
+		return err
+	}
+
+	if old == nil {
+		old = state.NewManifest(cfg.Name)
+	}
+	netState := oldNetwork(old)
+	rebuild := old.HostNetworkHash != networkHash || netState == nil
+	if !rebuild {
+		if err := a.Network.Verify(ctx, netState); err != nil {
+			rebuild = true
+		}
+	}
+
+	// Stop removed/restarted nodes before changing their TAPs or disks.
+	for name, node := range old.Nodes {
+		d := desired[name]
+		if d == nil || rebuild || d.StorageIdentityHash != node.StorageIdentityHash || d.RestartHash != node.RestartHash {
+			stopErr := a.stopNode(ctx, cfg.Name, name, node)
+			if err := state.Save(layout.ManifestPath, old); err != nil {
+				return err
+			}
+			if stopErr != nil {
+				return stopErr
+			}
+		}
+	}
+	if rebuild && netState != nil {
+		stopErr := a.stopNamespaceHelpers(old)
+		if err := state.Save(layout.ManifestPath, old); err != nil {
+			return err
+		}
+		if stopErr != nil {
+			return stopErr
+		}
+		if err := a.Network.Remove(ctx, netState); err != nil {
+			return err
+		}
+		netState = nil
+		old.NetworkState = nil
+		old.HostNetworkHash = ""
+		old.Links = map[string]*state.Link{}
+		old.ManagementHostInterfaces = map[string]*state.ManagementHostInterface{}
+		if err := state.Save(layout.ManifestPath, old); err != nil {
+			return err
+		}
+	}
+
+	// Remove nodes and explicitly removed disks only after all preflight checks.
+	for name, node := range old.Nodes {
+		d := desired[name]
+		if d == nil {
+			if err := removeRecordedNode(layout, name, node); err != nil {
+				return err
+			}
+			delete(old.Nodes, name)
+			if err := state.Save(layout.ManifestPath, old); err != nil {
+				return err
+			}
+			continue
+		}
+		if d.StorageIdentityHash != node.StorageIdentityHash {
+			if node.RootDisk != nil {
+				if err := os.Remove(node.RootDisk.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
+					return err
+				}
+				node.RootDisk = nil
+				if err := state.Save(layout.ManifestPath, old); err != nil {
+					return err
+				}
+			}
+			for _, item := range []struct {
+				path  *string
+				clear func()
+			}{{&node.SeedPath, func() { node.SeedDigest = ""; node.SeedPending = false }}, {&node.SerialLogPath, func() {}}, {&node.OVMFVarsPath, func() {}}} {
+				if *item.path != "" {
+					if err := os.Remove(*item.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+						return err
+					}
+					*item.path = ""
+					item.clear()
+					if err := state.Save(layout.ManifestPath, old); err != nil {
+						return err
+					}
+				}
+			}
+		}
+		wanted := map[string]bool{}
+		for _, disk := range d.AdditionalDisks {
+			wanted[disk.Name] = true
+		}
+		for i := 0; i < len(node.AdditionalDisks); {
+			disk := node.AdditionalDisks[i]
+			if !wanted[disk.Name] {
+				if err := os.Remove(disk.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
+					return err
+				}
+				node.AdditionalDisks = append(node.AdditionalDisks[:i], node.AdditionalDisks[i+1:]...)
+				if err := state.Save(layout.ManifestPath, old); err != nil {
+					return err
+				}
+				continue
+			}
+			i++
+		}
+	}
+
+	if netState == nil {
+		if checkpointNetwork, ok := a.Network.(interface {
+			ApplyCheckpoint(context.Context, *network.Plan, func(*network.State) error) (*network.State, error)
+		}); ok {
+			netState, err = checkpointNetwork.ApplyCheckpoint(ctx, plan, func(partial *network.State) error {
+				old.NetworkState, _ = json.Marshal(partial)
+				copyNetworkSummary(old, partial)
+				return state.Save(layout.ManifestPath, old)
+			})
+		} else {
+			netState, err = a.Network.Apply(ctx, plan)
+		}
+		if err != nil {
+			if netState != nil {
+				old.NetworkState, _ = json.Marshal(netState)
+				_ = state.Save(layout.ManifestPath, old)
+			}
+			return err
+		}
+		old.NetworkState, _ = json.Marshal(netState)
+		copyNetworkSummary(old, netState)
+		if err := state.Save(layout.ManifestPath, old); err != nil {
+			return err
+		}
+	}
+	if err := a.reconcileNamespaceHelpers(ctx, cfg, layout, old, netState); err != nil {
+		old.NetworkState, _ = json.Marshal(netState)
+		_ = state.Save(layout.ManifestPath, old)
+		return err
+	}
+	if err := a.materializeNodes(ctx, cfg, layout, old, desired, netState, templates); err != nil {
+		return err
+	}
+	old.ConfigurationHash, old.HostNetworkHash = configHash, networkHash
+	old.NetworkState, _ = json.Marshal(netState)
+	copyNetworkSummary(old, netState)
+	if err := state.Save(layout.ManifestPath, old); err != nil {
+		return err
+	}
+	for _, name := range cfg.VMNames() {
+		startErr := a.startNode(ctx, cfg, layout, old, name, old.Nodes[name], netState)
+		if err := state.Save(layout.ManifestPath, old); err != nil {
+			return err
+		}
+		if startErr != nil {
+			return startErr
+		}
+	}
+	return state.Save(layout.ManifestPath, old)
+}
+
+func (a *App) validateTemplates(ctx context.Context, cfg *config.Config) (map[string]qemu.TemplateInfo, error) {
+	used := map[string]bool{}
+	for _, vm := range cfg.VMs {
+		used[vm.Template] = true
+	}
+	out := map[string]qemu.TemplateInfo{}
+	for name := range used {
+		info, err := a.Images.ValidateTemplate(ctx, cfg.Templates[name])
+		if err != nil {
+			return nil, fmt.Errorf("template %s: %w", name, err)
+		}
+		out[name] = info
+	}
+	return out, nil
+}
+
+func oldNetwork(m *state.Manifest) *network.State {
+	n, _ := manifestNetwork(m)
+	return n
+}
+
+func manifestNetwork(m *state.Manifest) (*network.State, error) {
+	if m == nil || len(m.NetworkState) == 0 {
+		return nil, nil
+	}
+	var n network.State
+	if err := json.Unmarshal(m.NetworkState, &n); err != nil {
+		return nil, fmt.Errorf("decode manifest network state: %w", err)
+	}
+	return &n, nil
+}
+
+func copyNetworkSummary(m *state.Manifest, n *network.State) {
+	m.Links = map[string]*state.Link{}
+	for name, link := range n.Links {
+		v := &state.Link{GenerationID: link.GenerationID, GenerationStartedAt: link.GenerationStartedAt}
+		for _, ep := range link.Endpoints {
+			v.Endpoints = append(v.Endpoints, state.LinkEndpoint{Node: ep.Node, Interface: ep.Interface, IngressDevice: ep.IngressDevice, EgressDevice: ep.EgressDevice, ImpairmentDevice: ep.ImpairmentDevice})
+		}
+		m.Links[name] = v
+	}
+	m.DatapathVersion = n.DatapathVersion
+	m.FabricNamespace = n.FabricNamespace
+	m.ManagementHostNamespace = n.ManagementHostNamespace
+	m.ManagementHostInterfaces = map[string]*state.ManagementHostInterface{}
+	for name, h := range n.ManagementHostInterfaces {
+		m.ManagementHostInterfaces[name] = &state.ManagementHostInterface{LogicalName: name, DeviceName: h.DeviceName, OwnerAlias: h.Alias, MTU: h.MTU, Addresses: h.Addresses, Link: h.Link}
+	}
+}
+
+func (a *App) validateExisting(ctx context.Context, old *state.Manifest, desired map[string]*state.Node) error {
+	if old == nil {
+		return nil
+	}
+	for name, want := range desired {
+		got := old.Nodes[name]
+		if got == nil {
+			continue
+		}
+		if want.Kind == "vm" && got.StorageIdentityHash == want.StorageIdentityHash && got.BootstrapHash != "" && got.BootstrapHash != want.BootstrapHash {
+			return fmt.Errorf("VM %s bootstrap configuration is write-once; replace its template identity or run down", name)
+		}
+		var disks []*state.Disk
+		if got.RootDisk != nil && got.StorageIdentityHash == want.StorageIdentityHash {
+			disks = append(disks, got.RootDisk)
+		}
+		for i := range got.AdditionalDisks {
+			disks = append(disks, &got.AdditionalDisks[i])
+		}
+		wantCap := map[string]uint64{}
+		if want.RootDisk != nil {
+			wantCap[want.RootDisk.Name] = want.RootDisk.CapacityBytes
+		}
+		for _, d := range want.AdditionalDisks {
+			wantCap[d.Name] = d.CapacityBytes
+		}
+		for _, d := range disks {
+			cap, ok := wantCap[d.Name]
+			if !ok {
+				continue
+			}
+			// A write-ahead disk record may precede the atomic image creation.
+			// Materialization owns recreating that missing artifact.
+			if fileMissing(d.Path) {
+				continue
+			}
+			info, err := a.Images.Info(ctx, d.Path)
+			if err != nil {
+				return fmt.Errorf("inspect disk %s: %w", d.Path, err)
+			}
+			if cap < info.VirtualSize {
+				return fmt.Errorf("refusing to shrink disk %s from %d to %d bytes", d.Name, info.VirtualSize, cap)
+			}
+		}
+	}
+	return nil
+}
+
+func removeRecordedNode(layout state.Layout, name string, n *state.Node) error {
+	if n == nil {
+		return nil
+	}
+	manifest := state.NewManifest(layout.Topology)
+	manifest.Nodes[name] = n
+	if err := validateManifestPaths(layout, manifest); err != nil {
+		return err
+	}
+	for _, d := range append([]state.Disk{func() state.Disk {
+		if n.RootDisk != nil {
+			return *n.RootDisk
+		}
+		return state.Disk{}
+	}()}, n.AdditionalDisks...) {
+		if d.Path != "" {
+			if err := os.Remove(d.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		}
+	}
+	for _, p := range []string{n.SeedPath, n.OVMFVarsPath, n.PIDFile, n.QMPPath, n.SerialSocketPath, n.SerialLogPath, n.GuestAgentPath} {
+		if p != "" {
+			if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (a *App) start(ctx context.Context, cfg *config.Config, layout state.Layout, m *state.Manifest, args []string) error {
+	if m == nil {
+		return errors.New("topology is not up")
+	}
+	netState := oldNetwork(m)
+	if netState == nil {
+		return errors.New("managed network is absent; run up")
+	}
+	if err := a.Network.Verify(ctx, netState); err != nil {
+		return err
+	}
+	names, err := selectNodes(cfg, args)
+	if err != nil {
+		return err
+	}
+	for _, name := range names {
+		startErr := a.startNode(ctx, cfg, layout, m, name, m.Nodes[name], netState)
+		if err := state.Save(layout.ManifestPath, m); err != nil {
+			return err
+		}
+		if startErr != nil {
+			return startErr
+		}
+	}
+	return nil
+}
+
+func (a *App) stop(ctx context.Context, cfg *config.Config, layout state.Layout, m *state.Manifest, args []string) error {
+	if m == nil {
+		return errors.New("topology is not up")
+	}
+	names, err := selectNodes(cfg, args)
+	if err != nil {
+		return err
+	}
+	for _, name := range names {
+		stopErr := a.stopNode(ctx, cfg.Name, name, m.Nodes[name])
+		if err := state.Save(layout.ManifestPath, m); err != nil {
+			return err
+		}
+		if stopErr != nil {
+			return stopErr
+		}
+	}
+	return nil
+}
+
+func (a *App) restart(ctx context.Context, cfg *config.Config, layout state.Layout, m *state.Manifest, args []string) error {
+	if m == nil {
+		return errors.New("topology is not up")
+	}
+	netState := oldNetwork(m)
+	if netState == nil {
+		return errors.New("managed network is absent; run up")
+	}
+	if err := a.Network.Verify(ctx, netState); err != nil {
+		return err
+	}
+	names, err := selectNodes(cfg, args)
+	if err != nil {
+		return err
+	}
+	for _, name := range names {
+		stopErr := a.stopNode(ctx, cfg.Name, name, m.Nodes[name])
+		if err := state.Save(layout.ManifestPath, m); err != nil {
+			return err
+		}
+		if stopErr != nil {
+			return stopErr
+		}
+		startErr := a.startNode(ctx, cfg, layout, m, name, m.Nodes[name], netState)
+		if err := state.Save(layout.ManifestPath, m); err != nil {
+			return err
+		}
+		if startErr != nil {
+			return startErr
+		}
+	}
+	return nil
+}
+
+func selectNodes(cfg *config.Config, args []string) ([]string, error) {
+	all := cfg.VMNames()
+	if len(args) == 0 {
+		return all, nil
+	}
+	valid := map[string]bool{}
+	for _, n := range all {
+		valid[n] = true
+	}
+	seen := map[string]bool{}
+	out := []string{}
+	for _, n := range args {
+		if !valid[n] {
+			return nil, fmt.Errorf("unknown VM %q", n)
+		}
+		if !seen[n] {
+			out = append(out, n)
+			seen[n] = true
+		}
+	}
+	return out, nil
+}
+
+func (a *App) stopNode(ctx context.Context, topology, name string, n *state.Node) error {
+	if n == nil {
+		return nil
+	}
+	if n.PID > 0 && a.Processes.Alive(n.PID) {
+		if n.NetworkNamespace != "" {
+			same, err := a.Namespaces.SameProcess(n.PID, n.NetworkNamespace)
+			if err != nil {
+				return fmt.Errorf("verify QEMU PID %d namespace: %w", n.PID, err)
+			}
+			if !same {
+				return fmt.Errorf("QEMU PID %d is outside expected fabric namespace %s", n.PID, n.NetworkNamespace)
+			}
+		}
+		if err := a.Stopper.Stop(ctx, n.PID, topology, name, n.QMPPath); err != nil {
+			return err
+		}
+	}
+	n.PID, n.Process = 0, nil
+	if n.CollectorProcess != nil && n.CollectorProcess.PID > 0 {
+		if err := stopHelper(a.Processes, n.CollectorProcess); err != nil {
+			return err
+		}
+	}
+	n.CollectorProcess = nil
+	_ = os.Remove(n.PIDFile)
+	_ = os.Remove(n.QMPPath)
+	_ = os.Remove(n.SerialSocketPath)
+	_ = os.Remove(n.GuestAgentPath)
+	return nil
+}
+
+func stopHelper(p qemu.ProcessOps, proc *state.Process) error {
+	if !p.Alive(proc.PID) {
+		return nil
+	}
+	args, err := p.CommandLine(proc.PID)
+	if err != nil {
+		return err
+	}
+	for _, arg := range args {
+		if arg == proc.IdentityArg {
+			return p.Signal(proc.PID, os.Interrupt)
+		}
+	}
+	return fmt.Errorf("PID %d does not identify expected helper", proc.PID)
+}
+
+func (a *App) down(ctx context.Context, cfg *config.Config, layout state.Layout, m *state.Manifest) error {
+	if m == nil {
+		return nil
+	}
+	if err := verifyTopologyTree(layout, m); err != nil {
+		return err
+	}
+	for name, n := range m.Nodes {
+		if err := a.stopNode(ctx, cfg.Name, name, n); err != nil {
+			return err
+		}
+	}
+	stopHelpersErr := a.stopNamespaceHelpers(m)
+	if err := state.Save(layout.ManifestPath, m); err != nil {
+		return err
+	}
+	if stopHelpersErr != nil {
+		return stopHelpersErr
+	}
+	if n := oldNetwork(m); n != nil {
+		if err := a.Network.Remove(ctx, n); err != nil {
+			return err
+		}
+	}
+	for name, n := range m.Nodes {
+		if err := removeRecordedNode(layout, name, n); err != nil {
+			return err
+		}
+	}
+	for _, h := range m.Helpers {
+		if err := removeHelperFiles(h, true); err != nil {
+			return err
+		}
+	}
+	if err := os.Remove(layout.ManifestPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func RunSerialCollector(ctx context.Context, args []string, stderr io.Writer) int {
+	if len(args) != 3 {
+		fmt.Fprintln(stderr, "topolab: invalid serial collector invocation")
+		return 2
+	}
+	c := observability.SerialCollector{SocketPath: args[0], LogPath: args[1], Node: args[2]}
+	if err := c.Serve(ctx); err != nil {
+		fmt.Fprintf(stderr, "topolab: serial collector: %v\n", err)
+		return 1
+	}
+	return 0
+}

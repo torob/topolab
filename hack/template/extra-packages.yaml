@@ -1,0 +1,16 @@
+apt_url: http://archive.ubuntu.com/ubuntu
+packages:
+  - cloud-init
+  - openssh-client
+  - openssh-server
+  - curl
+  - ca-certificates
+  - iptables
+  - nftables
+  - iproute2
+  - iputils-ping
+  - traceroute
+  - qemu-guest-agent
+  - dnsmasq
+components: [main, restricted, universe, multiverse]
+suites: [release, updates, security]
