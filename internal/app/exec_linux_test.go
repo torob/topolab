@@ -3,11 +3,19 @@
 package app
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
+	"os"
 	"os/user"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/torob/topolab/internal/config"
+	"github.com/torob/topolab/internal/network"
+	"github.com/torob/topolab/internal/state"
 )
 
 func TestParseExecStrict(t *testing.T) {
@@ -36,6 +44,86 @@ func TestParseExecStrict(t *testing.T) {
 				t.Fatalf("got %#v, want %#v", got, test.want)
 			}
 		})
+	}
+}
+
+func TestRouterExecTargetAndOwnedNamespace(t *testing.T) {
+	cfg := &config.Config{Name: "lab", VMs: []*config.VM{{Name: "vm"}}, Routers: []*config.Router{{Name: "edge"}}, Switches: []*config.Switch{{Name: "sw"}}}
+	if err := validateRouterExecTarget(cfg, "edge"); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"vm", "sw", "missing"} {
+		if err := validateRouterExecTarget(cfg, name); err == nil {
+			t.Fatalf("accepted target %q", name)
+		}
+	}
+	ns := network.RouterNamespaceName("lab", "edge")
+	alias := network.NamespaceOwnerAlias("lab", "edge")
+	valid := &network.State{Namespaces: map[string]string{"edge": ns}, NamespaceAliases: map[string]string{"edge": alias}, Resources: []network.Resource{{Kind: network.ResourceNamespace, Name: ns, Alias: alias}}}
+	if got, err := routerExecNamespace("lab", "edge", valid); err != nil || got != ns {
+		t.Fatalf("namespace = %q, %v", got, err)
+	}
+	for _, mutate := range []func(*network.State){
+		func(s *network.State) { s.Namespaces["edge"] = "" },
+		func(s *network.State) { s.Namespaces["edge"] = "wrong" },
+		func(s *network.State) { s.NamespaceAliases["edge"] = "wrong" },
+		func(s *network.State) { s.Resources = nil },
+	} {
+		copyState := *valid
+		copyState.Namespaces = map[string]string{"edge": valid.Namespaces["edge"]}
+		copyState.NamespaceAliases = map[string]string{"edge": valid.NamespaceAliases["edge"]}
+		copyState.Resources = append([]network.Resource(nil), valid.Resources...)
+		mutate(&copyState)
+		if _, err := routerExecNamespace("lab", "edge", &copyState); err == nil {
+			t.Fatalf("accepted invalid state %#v", copyState)
+		}
+	}
+}
+
+func TestRouterExecRejectsAbsentLegacyAndUnownedStateBeforeStarting(t *testing.T) {
+	cfg := &config.Config{Name: "lab", Routers: []*config.Router{{Name: "edge"}}}
+	parent, err := os.MkdirTemp("/tmp", "tlexec-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(parent) })
+	layout, err := state.NewLayout(filepath.Join(parent, "work"), "lab")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := New(nil, nil)
+	a.defaults()
+	args := []string{"edge", "--", "true"}
+	if err := a.runRouterExec(context.Background(), cfg, layout, nil, args); err == nil || !strings.Contains(err.Error(), "not up") {
+		t.Fatalf("absent error = %v", err)
+	}
+	manifest := state.NewManifest("lab")
+	legacy := &network.State{DatapathVersion: 1, Topology: "lab"}
+	manifest.NetworkState, _ = json.Marshal(legacy)
+	if err := a.runRouterExec(context.Background(), cfg, layout, manifest, args); err == nil || !strings.Contains(err.Error(), "legacy") {
+		t.Fatalf("legacy error = %v", err)
+	}
+	missing := &network.State{DatapathVersion: network.DatapathVersion, Topology: "lab"}
+	manifest.NetworkState, _ = json.Marshal(missing)
+	if err := a.runRouterExec(context.Background(), cfg, layout, manifest, args); err == nil || !strings.Contains(err.Error(), "absent") {
+		t.Fatalf("missing namespace error = %v", err)
+	}
+	wrong := &network.State{DatapathVersion: network.DatapathVersion, Topology: "lab", Namespaces: map[string]string{"edge": "wrong"}}
+	manifest.NetworkState, _ = json.Marshal(wrong)
+	if err := a.runRouterExec(context.Background(), cfg, layout, manifest, args); err == nil || !strings.Contains(err.Error(), "owned namespace") {
+		t.Fatalf("ownership error = %v", err)
+	}
+}
+
+func TestExecIdentityArgumentPreservesManagementDefaultAndRootsRouters(t *testing.T) {
+	if got := execIdentityArgument("", false); got != "" {
+		t.Fatalf("management default = %q", got)
+	}
+	if got := execIdentityArgument("", true); got != "0" {
+		t.Fatalf("router default = %q", got)
+	}
+	if got := execIdentityArgument("alice", true); got != "alice" {
+		t.Fatalf("explicit router identity = %q", got)
 	}
 }
 

@@ -32,9 +32,26 @@ func (a *App) runRead(ctx context.Context, command Command, layout state.Layout,
 }
 
 func (a *App) ps(ctx context.Context, cfg *config.Config, m *state.Manifest, args []string) error {
-	if len(args) != 0 {
-		return errors.New("ps accepts no arguments")
+	format := "table"
+	formatSet := false
+	for i := 0; i < len(args); i++ {
+		if args[i] != "--format" || i+1 >= len(args) {
+			return fmt.Errorf("ps accepts only --format table|json")
+		}
+		i++
+		if formatSet || (args[i] != "table" && args[i] != "json") {
+			return errors.New("ps --format must be table or json and may be specified only once")
+		}
+		format = args[i]
+		formatSet = true
 	}
+	if format == "json" {
+		return a.psJSON(ctx, cfg, m)
+	}
+	return a.psTable(ctx, cfg, m)
+}
+
+func (a *App) psTable(ctx context.Context, cfg *config.Config, m *state.Manifest) error {
 	if m == nil {
 		fmt.Fprintln(a.Stdout, "NAME\tTYPE\tSTATE\tPID\tDETAILS")
 		return nil
@@ -123,6 +140,215 @@ func (a *App) ps(ctx context.Context, cfg *config.Config, m *state.Manifest, arg
 		}
 	}
 	return nil
+}
+
+type psStatus struct {
+	State      string `json:"state"`
+	DriftError string `json:"drift_error,omitempty"`
+}
+
+type psReport struct {
+	SchemaVersion            int                         `json:"schema_version"`
+	Topology                 psTopology                  `json:"topology"`
+	Network                  psStatus                    `json:"network"`
+	Nodes                    []psNode                    `json:"nodes"`
+	Namespaces               []psNamespace               `json:"namespaces"`
+	ManagementHostInterfaces []psManagementHostInterface `json:"management_host_interfaces"`
+}
+
+type psTopology struct {
+	Name string `json:"name"`
+	psStatus
+}
+
+type psNode struct {
+	Name               string                `json:"name"`
+	Type               string                `json:"type"`
+	State              string                `json:"state"`
+	DriftError         string                `json:"drift_error,omitempty"`
+	QEMU               *psQEMU               `json:"qemu,omitempty"`
+	Datapaths          []psDatapath          `json:"datapaths,omitempty"`
+	Balloon            *psBalloon            `json:"balloon,omitempty"`
+	GuestAgent         *psGuestAgent         `json:"guest_agent,omitempty"`
+	ExternalInterfaces []psExternalInterface `json:"external_interfaces,omitempty"`
+}
+
+type psQEMU struct {
+	State      string `json:"state"`
+	PID        int    `json:"pid"`
+	Namespace  string `json:"namespace,omitempty"`
+	DriftError string `json:"drift_error,omitempty"`
+}
+
+type psDatapath struct {
+	Interface string `json:"interface"`
+	Backend   string `json:"backend"`
+}
+
+type psBalloon struct {
+	TargetMB     uint64  `json:"target_mb"`
+	ObservedMB   *uint64 `json:"observed_mb,omitempty"`
+	ObserveError string  `json:"observe_error,omitempty"`
+}
+
+type psGuestAgent struct {
+	Available bool `json:"available"`
+}
+
+type psExternalInterface struct {
+	Interface       string   `json:"interface"`
+	EgressInterface string   `json:"egress_interface"`
+	SourceIP        string   `json:"source_ip"`
+	Sources         []string `json:"sources"`
+	TransitPrefix   string   `json:"transit_prefix"`
+	RouterAddress   string   `json:"router_address"`
+	HostAddress     string   `json:"host_address"`
+	Masquerade      bool     `json:"masquerade"`
+}
+
+type psNamespace struct {
+	Role       string `json:"role"`
+	Node       string `json:"node,omitempty"`
+	Name       string `json:"name"`
+	State      string `json:"state"`
+	DriftError string `json:"drift_error,omitempty"`
+}
+
+type psManagementHostInterface struct {
+	Name       string   `json:"name"`
+	State      string   `json:"state"`
+	DriftError string   `json:"drift_error,omitempty"`
+	Device     string   `json:"device,omitempty"`
+	MTU        int      `json:"mtu,omitempty"`
+	Addresses  []string `json:"addresses,omitempty"`
+	Link       string   `json:"link,omitempty"`
+	Namespace  string   `json:"namespace,omitempty"`
+	Isolated   bool     `json:"isolated"`
+}
+
+func (a *App) psJSON(ctx context.Context, cfg *config.Config, m *state.Manifest) error {
+	report := psReport{SchemaVersion: 1, Topology: psTopology{Name: cfg.Name, psStatus: psStatus{State: "absent"}}, Network: psStatus{State: "absent"}, Nodes: []psNode{}, Namespaces: []psNamespace{}, ManagementHostInterfaces: []psManagementHostInterface{}}
+	var netState *network.State
+	if m != nil {
+		report.Topology.State = "active"
+		netState = oldNetwork(m)
+		if netState != nil {
+			report.Network.State = "ready"
+			if err := a.Network.Verify(ctx, netState); err != nil {
+				report.Network.State = "drift"
+				report.Network.DriftError = err.Error()
+				report.Topology.State = "drift"
+				report.Topology.DriftError = err.Error()
+			}
+		}
+	}
+	for _, name := range cfg.VMNames() {
+		node := psNode{Name: name, Type: "vm", State: "absent", QEMU: &psQEMU{State: "absent"}}
+		var recorded *state.Node
+		if m != nil {
+			recorded = m.Nodes[name]
+		}
+		if recorded != nil {
+			node.State, node.QEMU.State = "stopped", "stopped"
+			node.QEMU.PID, node.QEMU.Namespace = recorded.PID, recorded.NetworkNamespace
+			if recorded.PID > 0 && a.Processes.Alive(recorded.PID) {
+				node.State, node.QEMU.State = "running", "running"
+				if recorded.NetworkNamespace == "" {
+					node.State, node.QEMU.State = "drift", "drift"
+					node.DriftError, node.QEMU.DriftError = "QEMU namespace is unrecorded", "QEMU namespace is unrecorded"
+				} else if same, err := a.Namespaces.SameProcess(recorded.PID, recorded.NetworkNamespace); err != nil || !same {
+					node.State, node.QEMU.State = "drift", "drift"
+					if err != nil {
+						node.QEMU.DriftError = err.Error()
+					} else {
+						node.QEMU.DriftError = "QEMU is outside its recorded namespace"
+					}
+					node.DriftError = node.QEMU.DriftError
+				}
+				client := a.OpenQMP(recorded.QMPPath)
+				if status, err := client.QueryStatus(ctx); err == nil && node.QEMU.State != "drift" {
+					node.State, node.QEMU.State = status, status
+				} else if err != nil && node.QEMU.DriftError == "" {
+					node.State, node.QEMU.State = "drift", "drift"
+					node.DriftError, node.QEMU.DriftError = err.Error(), err.Error()
+				}
+				if recorded.BalloonTargetMB != nil {
+					node.Balloon = &psBalloon{TargetMB: *recorded.BalloonTargetMB}
+					if current, err := client.QueryBalloon(ctx); err == nil {
+						observed := current >> 20
+						node.Balloon.ObservedMB = &observed
+					} else {
+						node.Balloon.ObserveError = err.Error()
+					}
+				}
+				_ = client.Close()
+			} else if recorded.BalloonTargetMB != nil {
+				node.Balloon = &psBalloon{TargetMB: *recorded.BalloonTargetMB}
+			}
+			for iface, tap := range recorded.TAPs {
+				node.Datapaths = append(node.Datapaths, psDatapath{Interface: iface, Backend: tap.Datapath})
+			}
+			slices.SortFunc(node.Datapaths, func(a, b psDatapath) int { return strings.Compare(a.Interface, b.Interface) })
+		}
+		if vm, ok := cfg.LookupVM(name); ok && vm.GuestAgent {
+			node.GuestAgent = &psGuestAgent{}
+			if recorded != nil {
+				probeCtx, cancel := context.WithTimeout(ctx, time.Second)
+				node.GuestAgent.Available = a.GuestAgentProbe(probeCtx, recorded.GuestAgentPath)
+				cancel()
+			}
+		}
+		report.Nodes = append(report.Nodes, node)
+	}
+	for _, name := range cfg.RouterNames() {
+		node := psNode{Name: name, Type: "router", State: report.Network.State}
+		if report.Network.DriftError != "" {
+			node.DriftError = report.Network.DriftError
+		}
+		if netState != nil {
+			for _, ext := range netState.External {
+				if ext.Router == name {
+					node.ExternalInterfaces = append(node.ExternalInterfaces, psExternalInterface{Interface: ext.Interface, EgressInterface: ext.EgressInterface, SourceIP: ext.SourceIP, Sources: append([]string(nil), ext.Sources...), TransitPrefix: ext.TransitPrefix, RouterAddress: ext.RouterAddress, HostAddress: ext.HostAddress, Masquerade: ext.Masquerade})
+				}
+			}
+			slices.SortFunc(node.ExternalInterfaces, func(a, b psExternalInterface) int { return strings.Compare(a.Interface, b.Interface) })
+		}
+		report.Nodes = append(report.Nodes, node)
+	}
+	for _, name := range cfg.SwitchNames() {
+		report.Nodes = append(report.Nodes, psNode{Name: name, Type: "switch", State: report.Network.State, DriftError: report.Network.DriftError})
+	}
+	if netState != nil {
+		for _, item := range []struct{ role, node, name string }{{"fabric", "", netState.FabricNamespace}, {"management-host", "", netState.ManagementHostNamespace}} {
+			report.Namespaces = append(report.Namespaces, psNamespace{Role: item.role, Node: item.node, Name: item.name, State: report.Network.State, DriftError: report.Network.DriftError})
+		}
+		for _, name := range cfg.RouterNames() {
+			report.Namespaces = append(report.Namespaces, psNamespace{Role: "router", Node: name, Name: netState.Namespaces[name], State: report.Network.State, DriftError: report.Network.DriftError})
+		}
+	}
+	for _, name := range cfg.ManagementHostInterfaceNames() {
+		item := psManagementHostInterface{Name: name, State: "absent"}
+		if netState != nil {
+			if iface, ok := netState.ManagementHostInterfaces[name]; ok {
+				item.State, item.DriftError = report.Network.State, report.Network.DriftError
+				item.Device, item.MTU, item.Addresses, item.Link = iface.DeviceName, iface.MTU, append([]string(nil), iface.Addresses...), iface.Link
+				item.Namespace, item.Isolated = netState.ManagementHostNamespace, netState.ManagementHostNFTTable != ""
+			}
+		}
+		report.ManagementHostInterfaces = append(report.ManagementHostInterfaces, item)
+	}
+	if report.Topology.State != "drift" {
+		for _, node := range report.Nodes {
+			if node.State == "drift" {
+				report.Topology.State = "drift"
+				report.Topology.DriftError = fmt.Sprintf("node %s: %s", node.Name, node.DriftError)
+				break
+			}
+		}
+	}
+	encoder := json.NewEncoder(a.Stdout)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(report)
 }
 
 type logsOptions struct {

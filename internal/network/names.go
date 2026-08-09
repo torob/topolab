@@ -35,6 +35,14 @@ func ManagementHostNamespaceName(topology string) string {
 	return namespaceName(topology, "management-host")
 }
 
+func RouterNamespaceName(topology, router string) string {
+	return namespaceName(topology, router)
+}
+
+func NamespaceOwnerAlias(topology, logical string) string {
+	return ownerAlias(topology, "namespace", logical)
+}
+
 func nftTableName(topology string) string { return DeviceName("tl", topology, "nft") }
 
 func ownerAlias(topology, kind, logical string) string {

@@ -86,7 +86,7 @@ func (a *App) validateNodePlans(cfg *config.Config, desired map[string]*state.No
 		}
 	}
 	for _, name := range cfg.VMNames() {
-		spec, err := qemuSpec(cfg, name, desired[name], netState)
+		spec, err := a.qemuSpec(cfg, name, desired[name], netState)
 		if err != nil {
 			return fmt.Errorf("preflight QEMU node %s: %w", name, err)
 		}
@@ -187,7 +187,7 @@ func (a *App) materializeNodes(ctx context.Context, cfg *config.Config, layout s
 			}
 		}
 		if fileMissing(want.OVMFVarsPath) {
-			if err := qemu.CopyFileAtomic(ovmfVars, want.OVMFVarsPath, 0o600); err != nil {
+			if err := qemu.CopyFileAtomic(a.OVMFVars, want.OVMFVarsPath, 0o600); err != nil {
 				return fmt.Errorf("create %s OVMF variables: %w", name, err)
 			}
 			if err := state.Save(layout.ManifestPath, m); err != nil {
@@ -315,7 +315,7 @@ func (a *App) startNode(ctx context.Context, cfg *config.Config, layout state.La
 	if err := a.startCollector(name, cfg.Name, n, checkpoint); err != nil {
 		return err
 	}
-	spec, err := qemuSpec(cfg, name, n, netState)
+	spec, err := a.qemuSpec(cfg, name, n, netState)
 	if err != nil {
 		return err
 	}
@@ -452,8 +452,8 @@ func (a *App) waitNodeReady(ctx context.Context, name string, n *state.Node, sta
 	return fmt.Errorf("QEMU node %s did not become ready: %w", name, lastErr)
 }
 
-func qemuSpec(cfg *config.Config, name string, n *state.Node, netState *network.State) (qemu.NodeSpec, error) {
-	s := qemu.NodeSpec{Topology: cfg.Name, Name: name, Firmware: qemu.Firmware{Code: ovmfCode, Vars: n.OVMFVarsPath}, QMPPath: n.QMPPath, PIDFile: n.PIDFile, SerialSocket: n.SerialSocketPath, GuestAgentSocket: n.GuestAgentPath, SeedPath: n.SeedPath}
+func (a *App) qemuSpec(cfg *config.Config, name string, n *state.Node, netState *network.State) (qemu.NodeSpec, error) {
+	s := qemu.NodeSpec{Topology: cfg.Name, Name: name, Firmware: qemu.Firmware{Code: a.OVMFCode, Vars: n.OVMFVarsPath}, QMPPath: n.QMPPath, PIDFile: n.PIDFile, SerialSocket: n.SerialSocketPath, GuestAgentSocket: n.GuestAgentPath, SeedPath: n.SeedPath}
 	vm, ok := cfg.LookupVM(name)
 	if !ok {
 		return s, fmt.Errorf("unknown VM %q", name)

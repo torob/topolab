@@ -29,15 +29,22 @@ This produces a stripped, statically linked binary at `bin/topolab`.
 ## Host requirements
 
 TopoLab supports Linux hosts with x86-64 hardware virtualization. Runtime
-commands require effective UID 0 and read/write access to `/dev/kvm`. The
-read-only `config` command does not require root.
+commands require effective UID 0. VM topologies additionally require read/write
+access to `/dev/kvm`; router-only topologies skip VM-only host checks. The
+read-only `config` and `version` commands do not require root.
 
-The host must provide `qemu-system-x86_64`, `qemu-img`, `ip`, `bridge`, `tc`,
-`nft`, and `xorriso`. QEMU nodes also require OVMF firmware at
+The host must provide `ip`, `bridge`, `tc`, and `nft`. Topologies containing
+QEMU nodes additionally require `qemu-system-x86_64`, `qemu-img`, `xorriso`,
+and OVMF firmware at
 `/usr/share/OVMF/OVMF_CODE_4M.fd` and
 `/usr/share/OVMF/OVMF_VARS_4M.fd`. `dnsmasq` is required only when a router
 serves DHCP. TopoLab does not install or configure these host
 dependencies.
+
+VM helper locations may be selected with the global `--qemu-system`,
+`--qemu-img`, `--ovmf-code`, `--ovmf-vars`, and `--xorriso` flags. Executable
+overrides must be executable regular files and firmware overrides must be
+readable regular files.
 
 ## Usage
 
@@ -50,9 +57,13 @@ namespaces.
 WORKING_DIR=/var/tmp/topolab topolab -f topology.yml config
 sudo WORKING_DIR=/var/tmp/topolab topolab -f topology.yml up
 sudo WORKING_DIR=/var/tmp/topolab topolab -f topology.yml ps
+sudo WORKING_DIR=/var/tmp/topolab topolab -f topology.yml ps --format json
 sudo WORKING_DIR=/var/tmp/topolab topolab -f topology.yml \
   exec -- ssh user@management-address
+sudo WORKING_DIR=/var/tmp/topolab topolab -f topology.yml \
+  router exec edge -- ip route show
 sudo WORKING_DIR=/var/tmp/topolab topolab -f topology.yml down
+topolab version
 ```
 
 Global flags precede the command. State is kept under
@@ -73,6 +84,18 @@ the exact child status. The child runs as the original sudo caller by default,
 with supplementary groups and `HOME`/`USER`/`LOGNAME` reset; `--user` selects
 another local passwd entry. Root is retained only by the small supervisor that
 holds the lock and reaps the child.
+
+`router exec NAME [--user USER] [--cwd DIR] -- COMMAND...` provides the same
+direct-exec, locking, stdio, TTY, signal, and exit-status behavior in a
+configured router's ownership-validated namespace. Router commands run as root
+by default so tools such as `ip`, `nft`, and `tc` can administer that
+namespace; `--user` explicitly selects another local account. Management-host
+`exec` keeps its original-caller default described above.
+
+`ps --format json` emits the stable schema version 1 representation of topology
+and network state, nodes, namespaces, management-host interfaces, QEMU PIDs and
+state, datapaths, balloon observations, guest-agent availability, and router
+external interfaces. Drift errors are separate fields rather than state text.
 
 The former top-level `host` key is intentionally unsupported. Rename it to
 `management_host`; if the topology is active under the legacy root datapath,

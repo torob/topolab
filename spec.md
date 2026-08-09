@@ -35,12 +35,14 @@ The following features are outside version 1:
 The supported host is Ubuntu 26.04 on x86-64 with hardware virtualization and
 an accessible `/dev/kvm`.
 
-The following commands are required for normal operation:
+The following commands are required for networking operation:
 
-- `qemu-system-x86_64` and `qemu-img`;
 - `ip`, `bridge`, and `tc` from iproute2;
-- `nft`;
-- `xorriso`.
+- `nft`.
+
+Topologies containing VMs additionally require `qemu-system-x86_64`,
+`qemu-img`, `xorriso`, accessible KVM, and OVMF. Router-only topologies skip
+these VM-only requirements.
 
 `dnsmasq` is additionally required when a router declares a DHCP
 server. QEMU VMs require `/usr/share/OVMF/OVMF_CODE_4M.fd` and
@@ -50,25 +52,33 @@ The Linux vhost-net accelerator is optional. When `/dev/vhost-net` is
 available and accessible, the tool uses it automatically for VirtIO VM
 interfaces. Its absence must not prevent a VM from running.
 
-`config` is read-only and may run as an ordinary user. All other commands
-require the privileges described by their command contracts. The CLI must
-reject runtime operations rather than silently falling back to unaccelerated
-QEMU or partially configured networking.
+`config` and `version` are read-only and may run as an ordinary user. All other
+commands require the privileges described by their command contracts. The CLI
+must reject runtime operations rather than silently falling back to
+unaccelerated QEMU or partially configured networking.
 
 ## 3. Command-line interface
 
 The invocation form is:
 
 ```text
-topolab [-f FILE|--file FILE] [--working-dir DIR] COMMAND [OPTIONS] [NODE ...]
+topolab [GLOBAL OPTIONS] COMMAND [OPTIONS]
 ```
 
 `FILE` defaults to `topology.yml`. Global options must precede the command.
-The working directory is required for every command and is selected from
-`--working-dir` when present, otherwise from the `WORKING_DIR` process
-environment variable. The CLI must fail if neither source supplies a non-empty
-value. A relative working directory is resolved against the process's current
-directory. The command-line option takes precedence over the environment.
+The working directory is required for every command except `version` and is
+selected from `--working-dir` when present, otherwise from the `WORKING_DIR`
+process environment variable. The CLI must fail if neither source supplies a
+non-empty value. A relative working directory is resolved against the process's
+current directory. The command-line option takes precedence over the
+environment.
+
+Global VM-helper options are `--qemu-system PATH`, `--qemu-img PATH`,
+`--ovmf-code PATH`, `--ovmf-vars PATH`, and `--xorriso PATH`. Executable
+overrides must resolve to executable regular files; firmware overrides must be
+readable regular files. The selected helpers are resolved once and used by
+preflight and all subsequent VM operations. Defaults retain PATH lookup for
+executables and the standard OVMF paths from Section 2.
 
 ### 3.1 Commands
 
@@ -82,7 +92,7 @@ directory. The command-line option takes precedence over the environment.
   its backing-template identity changes, repair missing networking, and ensure
   every QEMU VM is running.
 
-`ps`
+`ps [--format table|json]`
 : Print QEMU VMs, routers, and switches with their type, runtime
   state, and QEMU PID where applicable. Router output identifies external
   interfaces and their host egress. For VMs it also prints the configured and
@@ -91,6 +101,17 @@ directory. The command-line option takes precedence over the environment.
   reports both topology namespaces and every management-host interface, its
   addresses and link, and whether
   its isolation rules are installed.
+  Table output remains the default. JSON uses `schema_version: 1` and contains
+  typed topology and network status, nodes, namespaces, management-host
+  interfaces, QEMU status and PIDs, datapaths, balloon state, guest-agent
+  availability, and router external-interface details. Drift errors occupy
+  dedicated fields and are never embedded in state strings.
+
+`version`
+: Print the TopoLab version without loading a topology, resolving a working
+  directory, requiring root, or probing runtime dependencies. Release builds
+  print their injected semantic version, versioned module installs use Go build
+  information, and local development builds print `devel`.
 
 `logs [--follow|-f] [--tail N|all] [--timestamps] [NODE ...]`
 : Read timestamped serial records for selected QEMU VMs. With no node
@@ -127,6 +148,16 @@ directory. The command-line option takes precedence over the environment.
   hold the lock, forward signals to the child process group, reap it, and
   return its exact exit status. Every descendant inherits the management-host
   namespace.
+
+`router exec NAME [--user USER] [--cwd DIR] -- COMMAND [ARG...]`
+: Resolve `NAME` through the configured routers and execute argv directly in
+  that router's namespace. Missing, unknown, non-router, absent, legacy, or
+  incorrectly owned targets are rejected before the child starts. Stdio, TTY,
+  locking, signal forwarding, environment sanitization, and exact exit-status
+  behavior match management-host `exec`. The default identity is root so
+  router administration commands retain the necessary capabilities;
+  `--user` selects a local passwd-database account and drops to its primary and
+  supplementary groups.
 
 `start [NODE ...]`, `stop [NODE ...]`, `restart [NODE ...]`
 : Operate on selected QEMU VMs, or all QEMU VMs when no names are supplied.
@@ -1106,7 +1137,8 @@ beneath `working_dir`, including `templates/`, is not topology state. No
 runtime file is created under a fixed `/var/lib` or `/run` location.
 
 Only one operation may mutate a topology at a time; mutations take an
-exclusive file lock. `exec` holds a shared lock for the full child lifetime.
+exclusive file lock. Both management-host and router `exec` hold a shared lock
+for the full child lifetime.
 
 The manifest records a datapath version; deterministic fabric and management-
 host namespace names and ownership aliases; namespace scope for every managed

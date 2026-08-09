@@ -17,6 +17,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/torob/topolab/internal/config"
 	"github.com/torob/topolab/internal/network"
 	"github.com/torob/topolab/internal/state"
 	"golang.org/x/sys/unix"
@@ -167,6 +168,67 @@ func (a *App) runExec(ctx context.Context, layout state.Layout, manifest *state.
 	if err != nil {
 		return err
 	}
+	return a.runNamespacedExec(ctx, layout, manifest, opts, false, func(netState *network.State) (string, error) {
+		if netState.ManagementHostNamespace == "" {
+			return "", errors.New("management-host namespace is absent")
+		}
+		return netState.ManagementHostNamespace, nil
+	})
+}
+
+func (a *App) runRouterExec(ctx context.Context, cfg *config.Config, layout state.Layout, manifest *state.Manifest, args []string) error {
+	if len(args) == 0 || args[0] == "" {
+		return errors.New("router exec requires NAME")
+	}
+	name := args[0]
+	if err := validateRouterExecTarget(cfg, name); err != nil {
+		return err
+	}
+	opts, err := parseExec(args[1:])
+	if err != nil {
+		return err
+	}
+	resolve := func(netState *network.State) (string, error) {
+		return routerExecNamespace(cfg.Name, name, netState)
+	}
+	return a.runNamespacedExec(ctx, layout, manifest, opts, true, resolve)
+}
+
+func validateRouterExecTarget(cfg *config.Config, name string) error {
+	if _, ok := cfg.LookupRouter(name); ok {
+		return nil
+	}
+	if _, vm := cfg.LookupVM(name); vm {
+		return fmt.Errorf("target %q is a VM, not a router", name)
+	}
+	if _, sw := cfg.LookupSwitch(name); sw {
+		return fmt.Errorf("target %q is a switch, not a router", name)
+	}
+	return fmt.Errorf("unknown router %q", name)
+}
+
+func routerExecNamespace(topology, name string, netState *network.State) (string, error) {
+	wantNamespace := network.RouterNamespaceName(topology, name)
+	namespace := netState.Namespaces[name]
+	if namespace == "" {
+		return "", fmt.Errorf("router %q namespace is absent", name)
+	}
+	if namespace != wantNamespace {
+		return "", fmt.Errorf("router %q namespace %q is not the owned namespace %q", name, namespace, wantNamespace)
+	}
+	wantAlias := network.NamespaceOwnerAlias(topology, name)
+	if netState.NamespaceAliases[name] != wantAlias {
+		return "", fmt.Errorf("router %q namespace has an incorrect ownership alias", name)
+	}
+	for _, resource := range netState.Resources {
+		if resource.Kind == network.ResourceNamespace && resource.Name == namespace && resource.Alias == wantAlias {
+			return namespace, nil
+		}
+	}
+	return "", fmt.Errorf("router %q namespace ownership is not recorded", name)
+}
+
+func (a *App) runNamespacedExec(ctx context.Context, layout state.Layout, manifest *state.Manifest, opts execOptions, rootDefault bool, resolveNamespace func(*network.State) (string, error)) error {
 	if manifest == nil {
 		return errors.New("topology is not up")
 	}
@@ -174,13 +236,17 @@ func (a *App) runExec(ctx context.Context, layout state.Layout, manifest *state.
 	if err != nil || netState == nil {
 		return errors.New("managed network is absent; run up")
 	}
-	if netState.DatapathVersion != network.DatapathVersion || netState.ManagementHostNamespace == "" {
+	if netState.DatapathVersion != network.DatapathVersion {
 		return errors.New("topology uses a legacy datapath; run down and then up before exec")
+	}
+	if _, err := resolveNamespace(netState); err != nil {
+		return err
 	}
 	if err := a.Network.Verify(ctx, netState); err != nil {
 		return err
 	}
-	identity, err := resolveExecIdentity(opts.User, os.Getuid(), os.Getgid(), os.LookupEnv, osIdentityLookup{})
+	identityName := execIdentityArgument(opts.User, rootDefault)
+	identity, err := resolveExecIdentity(identityName, os.Getuid(), os.Getgid(), os.LookupEnv, osIdentityLookup{})
 	if err != nil {
 		return err
 	}
@@ -201,14 +267,27 @@ func (a *App) runExec(ctx context.Context, layout state.Layout, manifest *state.
 	if err != nil || manifest == nil {
 		return errors.New("topology is not up")
 	}
+	if err := validateManifestPaths(layout, manifest); err != nil {
+		return err
+	}
 	netState, err = manifestNetwork(manifest)
 	if err != nil || netState == nil {
 		return errors.New("managed network is absent")
 	}
+	if err := validateManifestNetwork(layout, netState); err != nil {
+		return err
+	}
 	if err := a.Network.Verify(ctx, netState); err != nil {
 		return err
 	}
-	config := execChildConfig{Namespace: netState.ManagementHostNamespace, Identity: identity, Cwd: opts.Cwd, Env: sanitizedExecEnvironment(os.Environ(), identity)}
+	if netState.DatapathVersion != network.DatapathVersion {
+		return errors.New("topology uses a legacy datapath; run down and then up before exec")
+	}
+	namespace, err := resolveNamespace(netState)
+	if err != nil {
+		return err
+	}
+	config := execChildConfig{Namespace: namespace, Identity: identity, Cwd: opts.Cwd, Env: sanitizedExecEnvironment(os.Environ(), identity)}
 	raw, err := json.Marshal(config)
 	if err != nil {
 		return err
@@ -268,6 +347,13 @@ func (a *App) runExec(ctx context.Context, layout state.Layout, manifest *state.
 	}
 }
 
+func execIdentityArgument(explicit string, rootDefault bool) string {
+	if explicit == "" && rootDefault {
+		return "0"
+	}
+	return explicit
+}
+
 func sanitizedSupervisorEnvironment(env []string) []string {
 	return filterEnvironment(env, map[string]bool{"LD_PRELOAD": true, "LD_LIBRARY_PATH": true, "BASH_ENV": true, "ENV": true, "IFS": true, "CDPATH": true, "GLOBIGNORE": true})
 }
@@ -289,8 +375,9 @@ func filterEnvironment(env []string, blocked map[string]bool) []string {
 	return out
 }
 
-// RunExecChild permanently enters the management-host namespace, drops every
-// privileged identity/capability, and execs the requested argv directly.
+// RunExecChild permanently enters the selected managed namespace, assumes the
+// selected local identity, clears inherited capabilities, and execs argv.
+// A root router identity regains the capabilities Linux grants UID 0 at exec.
 func RunExecChild(configFile *os.File, argv []string, stderr *os.File) int {
 	if len(argv) == 0 {
 		fmt.Fprintln(stderr, "topolab: internal exec child has no command")

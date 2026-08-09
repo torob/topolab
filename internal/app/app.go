@@ -21,16 +21,20 @@ import (
 	"github.com/torob/topolab/internal/state"
 )
 
-const (
-	ovmfCode = "/usr/share/OVMF/OVMF_CODE_4M.fd"
-	ovmfVars = "/usr/share/OVMF/OVMF_VARS_4M.fd"
-)
-
 type Command struct {
 	Name       string
 	Args       []string
 	Topology   *config.Config
 	WorkingDir string
+	Helpers    HelperOverrides
+}
+
+type HelperOverrides struct {
+	QEMUSystem string
+	QEMUImg    string
+	OVMFCode   string
+	OVMFVars   string
+	Xorriso    string
 }
 
 type imageManager interface {
@@ -72,6 +76,11 @@ type App struct {
 	Executable      func() (string, error)
 	VhostAvailable  func() bool
 	GuestAgentProbe func(context.Context, string) bool
+	OVMFCode        string
+	OVMFVars        string
+	imagesDefault   bool
+	seedsDefault    bool
+	qemuDefault     bool
 }
 
 func New(stdout, stderr io.Writer) *App {
@@ -93,12 +102,21 @@ func (a *App) defaults() {
 	}
 	if a.Images == nil {
 		a.Images = qemu.NewImageManager(nil, "")
+		a.imagesDefault = true
 	}
 	if a.Seeds == nil {
 		a.Seeds = cloudinit.NewISOBuilder(nil, "")
+		a.seedsDefault = true
 	}
 	if a.QEMUBuilder == nil {
 		a.QEMUBuilder = qemu.NewBuilder("")
+		a.qemuDefault = true
+	}
+	if a.OVMFCode == "" {
+		a.OVMFCode = preflight.DefaultOVMFCode
+	}
+	if a.OVMFVars == "" {
+		a.OVMFVars = preflight.DefaultOVMFVars
 	}
 	if a.StartProcess == nil {
 		a.StartProcess = qemu.Start
@@ -164,7 +182,26 @@ func (a *App) Run(ctx context.Context, command Command) error {
 		if err := validateManifestPaths(layout, m); err != nil {
 			return err
 		}
+		if networkState, err := manifestNetwork(m); err != nil {
+			return err
+		} else if err := validateManifestNetwork(layout, networkState); err != nil {
+			return err
+		}
 		return a.runExec(ctx, layout, m, command.Args)
+	case "router-exec":
+		m, err := state.Load(layout.ManifestPath)
+		if err != nil {
+			return err
+		}
+		if err := validateManifestPaths(layout, m); err != nil {
+			return err
+		}
+		if networkState, err := manifestNetwork(m); err != nil {
+			return err
+		} else if err := validateManifestNetwork(layout, networkState); err != nil {
+			return err
+		}
+		return a.runRouterExec(ctx, command.Topology, layout, m, command.Args)
 	case "up", "start", "stop", "restart", "down":
 		// A missing down is genuinely read-only and idempotent. Start/stop also
 		// report absence without manufacturing an empty topology directory.
@@ -181,7 +218,7 @@ func (a *App) Run(ctx context.Context, command Command) error {
 			}
 		}
 		if command.Name == "up" || command.Name == "start" || command.Name == "restart" {
-			if err := a.runtimePreflight(command.Topology); err != nil {
+			if err := a.runtimePreflight(command.Topology, command.Helpers); err != nil {
 				return err
 			}
 		}
@@ -227,7 +264,7 @@ func (a *App) Run(ctx context.Context, command Command) error {
 	return fmt.Errorf("unknown runtime command %q", command.Name)
 }
 
-func (a *App) runtimePreflight(cfg *config.Config) error {
+func (a *App) runtimePreflight(cfg *config.Config, overrides HelperOverrides) error {
 	needsDNS := false
 	cpuModels := map[string]bool{}
 	deviceModels := map[string]bool{"ide-cd": len(cfg.VMs) > 0}
@@ -289,7 +326,23 @@ func (a *App) runtimePreflight(cfg *config.Config) error {
 	for _, key := range planKeys {
 		plans = append(plans, cpuPlans[key])
 	}
-	return a.Preflight(preflight.Options{NeedsDNSMasq: needsDNS, RequireFirmware: len(cfg.VMs) > 0, CPUModels: cpus, DeviceModels: devices, CPUPlans: plans})
+	paths, err := preflight.ResolveHelperPaths(len(cfg.VMs) > 0, preflight.HelperPaths{QEMUSystem: overrides.QEMUSystem, QEMUImg: overrides.QEMUImg, OVMFCode: overrides.OVMFCode, OVMFVars: overrides.OVMFVars, Xorriso: overrides.Xorriso}, nil, nil)
+	if err != nil {
+		return err
+	}
+	if len(cfg.VMs) > 0 {
+		if a.Images == nil || a.imagesDefault {
+			a.Images = qemu.NewImageManager(nil, paths.QEMUImg)
+		}
+		if a.Seeds == nil || a.seedsDefault {
+			a.Seeds = cloudinit.NewISOBuilder(nil, paths.Xorriso)
+		}
+		if a.QEMUBuilder == nil || a.qemuDefault {
+			a.QEMUBuilder = qemu.NewBuilder(paths.QEMUSystem)
+		}
+		a.OVMFCode, a.OVMFVars = paths.OVMFCode, paths.OVMFVars
+	}
+	return a.Preflight(preflight.Options{NeedsDNSMasq: needsDNS, RequireVM: len(cfg.VMs) > 0, Helpers: paths, HelpersResolved: len(cfg.VMs) > 0, CPUModels: cpus, DeviceModels: devices, CPUPlans: plans})
 }
 
 func (a *App) up(ctx context.Context, cfg *config.Config, layout state.Layout, old *state.Manifest) error {

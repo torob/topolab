@@ -17,7 +17,7 @@ var commandNames = map[string]bool{
 	"config": true, "up": true, "ps": true, "logs": true,
 	"capture": true, "counters": true, "start": true, "stop": true,
 	"restart": true, "down": true,
-	"exec": true,
+	"exec": true, "router": true, "version": true,
 }
 
 // RuntimeCommand is the validated, normalized handoff to lifecycle packages.
@@ -26,6 +26,7 @@ type RuntimeCommand struct {
 	Args       []string
 	Topology   *config.Config
 	WorkingDir string
+	Helpers    app.HelperOverrides
 }
 
 type Runtime interface {
@@ -35,7 +36,7 @@ type Runtime interface {
 type runtimeAdapter struct{ app *app.App }
 
 func (r runtimeAdapter) Run(ctx context.Context, command RuntimeCommand) error {
-	return r.app.Run(ctx, app.Command{Name: command.Name, Args: command.Args, Topology: command.Topology, WorkingDir: command.WorkingDir})
+	return r.app.Run(ctx, app.Command{Name: command.Name, Args: command.Args, Topology: command.Topology, WorkingDir: command.WorkingDir, Helpers: command.Helpers})
 }
 
 type CLI struct {
@@ -68,8 +69,17 @@ func (c CLI) Execute(ctx context.Context, args []string) int {
 	file := fs.String("file", "topology.yml", "topology YAML file")
 	fs.StringVar(file, "f", "topology.yml", "topology YAML file")
 	working := fs.String("working-dir", "", "working directory")
+	qemuSystem := fs.String("qemu-system", "", "qemu-system-x86_64 executable override")
+	qemuImg := fs.String("qemu-img", "", "qemu-img executable override")
+	ovmfCode := fs.String("ovmf-code", "", "OVMF code firmware override")
+	ovmfVars := fs.String("ovmf-vars", "", "OVMF variables firmware override")
+	xorriso := fs.String("xorriso", "", "xorriso executable override")
 	fs.Usage = func() {
-		fmt.Fprintln(c.Stderr, "usage: topolab [-f FILE|--file FILE] [--working-dir DIR] COMMAND [OPTIONS] [NODE ...]")
+		fmt.Fprintln(c.Stderr, "usage: topolab [GLOBAL OPTIONS] COMMAND [OPTIONS]")
+		fmt.Fprintln(c.Stderr, "       topolab exec [--user USER] [--cwd DIR] -- COMMAND...")
+		fmt.Fprintln(c.Stderr, "       topolab router exec NAME [--user USER] [--cwd DIR] -- COMMAND...")
+		fmt.Fprintln(c.Stderr, "global options:")
+		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -84,6 +94,26 @@ func (c CLI) Execute(ctx context.Context, args []string) int {
 		fmt.Fprintf(c.Stderr, "topolab: unknown command %q\n", name)
 		fs.Usage()
 		return 2
+	}
+	if name == "version" {
+		if len(rest) != 1 {
+			fmt.Fprintln(c.Stderr, "topolab: version accepts no arguments")
+			return 2
+		}
+		fmt.Fprintf(c.Stdout, "topolab %s\n", buildVersion())
+		return 0
+	}
+	if name == "router" {
+		if len(rest) < 2 || rest[1] != "exec" {
+			fmt.Fprintln(c.Stderr, "topolab: router requires the exec subcommand")
+			return 2
+		}
+		if len(rest) < 3 || strings.HasPrefix(rest[2], "-") {
+			fmt.Fprintln(c.Stderr, "topolab: router exec requires NAME")
+			return 2
+		}
+		name = "router-exec"
+		rest = append([]string{name}, rest[2:]...)
 	}
 	wd := *working
 	if strings.TrimSpace(wd) == "" {
@@ -114,14 +144,16 @@ func (c CLI) Execute(ctx context.Context, args []string) int {
 		return 0
 	}
 	if c.EUID() != 0 {
-		fmt.Fprintf(c.Stderr, "topolab: %s requires effective UID 0\n", name)
+		displayName := strings.ReplaceAll(name, "-", " ")
+		fmt.Fprintf(c.Stderr, "topolab: %s requires effective UID 0\n", displayName)
 		return 1
 	}
 	if c.Runtime == nil {
 		fmt.Fprintf(c.Stderr, "topolab: command %q is not implemented\n", name)
 		return 1
 	}
-	if err := c.Runtime.Run(ctx, RuntimeCommand{Name: name, Args: append([]string(nil), rest[1:]...), Topology: result.Config, WorkingDir: result.WorkingDir}); err != nil {
+	helpers := app.HelperOverrides{QEMUSystem: *qemuSystem, QEMUImg: *qemuImg, OVMFCode: *ovmfCode, OVMFVars: *ovmfVars, Xorriso: *xorriso}
+	if err := c.Runtime.Run(ctx, RuntimeCommand{Name: name, Args: append([]string(nil), rest[1:]...), Topology: result.Config, WorkingDir: result.WorkingDir, Helpers: helpers}); err != nil {
 		var childExit *app.ChildExitError
 		if errors.As(err, &childExit) {
 			return childExit.Code

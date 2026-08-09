@@ -1,4 +1,9 @@
 GO ?= go
+VERSION ?=
+BUILD_LDFLAGS := -s -w
+ifneq ($(strip $(VERSION)),)
+BUILD_LDFLAGS += -X main.version=$(VERSION)
+endif
 
 .PHONY: all build test test-race vet fmt check
 
@@ -6,7 +11,7 @@ all: check build
 
 build:
 	mkdir -p bin
-	CGO_ENABLED=0 $(GO) build -trimpath -ldflags="-s -w" -o bin/topolab ./cmd/topolab
+	CGO_ENABLED=0 $(GO) build -trimpath -ldflags="$(BUILD_LDFLAGS)" -o bin/topolab ./cmd/topolab
 
 test:
 	$(GO) test ./...

@@ -4,14 +4,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/torob/topolab/internal/cloudinit"
 	"github.com/torob/topolab/internal/config"
 	"github.com/torob/topolab/internal/network"
+	"github.com/torob/topolab/internal/preflight"
 	"github.com/torob/topolab/internal/qemu"
 	"github.com/torob/topolab/internal/state"
 )
@@ -369,5 +372,146 @@ func TestPSListsVMsBeforeRoutersAndLabelsRouter(t *testing.T) {
 	vmLine, routerLine := strings.Index(text, "vm\tvm\t"), strings.Index(text, "r\trouter\tready\t-\t")
 	if vmLine < 0 || routerLine < 0 || vmLine > routerLine {
 		t.Fatalf("unexpected ps output:\n%s", text)
+	}
+}
+
+func TestPSJSONReportsStableTypedState(t *testing.T) {
+	target := uint64(256)
+	cfg := &config.Config{Name: "lab", ManagementHost: config.ManagementHost{Interfaces: []*config.ManagementHostInterface{{Name: "management"}}}, VMs: []*config.VM{{Name: "vm", GuestAgent: true}}, Routers: []*config.Router{{Name: "edge"}}}
+	netState := &network.State{
+		Topology:                "lab",
+		FabricNamespace:         "fabric",
+		ManagementHostNamespace: "management",
+		Namespaces:              map[string]string{"edge": "router-edge"},
+		ManagementHostInterfaces: map[string]network.ManagementHostInterface{
+			"management": {LogicalName: "management", DeviceName: "tlm0", MTU: 1500, Addresses: []string{"192.0.2.1/24"}, Link: "lan"},
+		},
+		ManagementHostNFTTable: "tl-mgmt",
+		External:               []network.ResolvedExternal{{External: network.External{Router: "edge", Interface: "wan", EgressInterface: "eth0", SourceIP: "192.0.2.10", Sources: []string{"10.0.0.0/24"}, TransitPrefix: "198.18.0.0/30", RouterAddress: "198.18.0.1", HostAddress: "198.18.0.2"}, Masquerade: true}},
+	}
+	m := state.NewManifest("lab")
+	m.Nodes["vm"] = &state.Node{Kind: "vm", BalloonTargetMB: &target, TAPs: map[string]state.TAP{"eth0": {Datapath: "vhost-net"}}}
+	m.NetworkState, _ = json.Marshal(netState)
+	var out bytes.Buffer
+	a := New(&out, nil)
+	a.Network = checkpointNetwork{state: netState}
+	a.Processes = &fakeProcesses{alive: map[int]bool{}}
+	a.GuestAgentProbe = func(context.Context, string) bool { return false }
+	a.defaults()
+	if err := a.ps(context.Background(), cfg, m, []string{"--format", "json"}); err != nil {
+		t.Fatal(err)
+	}
+	var report psReport
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+		t.Fatalf("decode JSON: %v\n%s", err, out.String())
+	}
+	if report.SchemaVersion != 1 || report.Topology.State != "active" || report.Network.State != "ready" {
+		t.Fatalf("status = %#v", report)
+	}
+	if len(report.Nodes) != 2 || report.Nodes[0].QEMU == nil || report.Nodes[0].QEMU.State != "stopped" || len(report.Nodes[0].Datapaths) != 1 || report.Nodes[0].Balloon == nil || report.Nodes[0].GuestAgent == nil {
+		t.Fatalf("VM status = %#v", report.Nodes)
+	}
+	if len(report.Nodes[1].ExternalInterfaces) != 1 || !report.Nodes[1].ExternalInterfaces[0].Masquerade {
+		t.Fatalf("router status = %#v", report.Nodes[1])
+	}
+	if len(report.Namespaces) != 3 || len(report.ManagementHostInterfaces) != 1 || report.ManagementHostInterfaces[0].Device != "tlm0" || !report.ManagementHostInterfaces[0].Isolated {
+		t.Fatalf("network details = %#v %#v", report.Namespaces, report.ManagementHostInterfaces)
+	}
+}
+
+type driftNetwork struct {
+	checkpointNetwork
+	err error
+}
+
+func (f driftNetwork) Verify(context.Context, *network.State) error { return f.err }
+
+func TestPSJSONAbsentAndDriftKeepErrorsOutOfState(t *testing.T) {
+	cfg := &config.Config{Name: "lab", Routers: []*config.Router{{Name: "edge"}}}
+	var out bytes.Buffer
+	a := New(&out, nil)
+	a.defaults()
+	if err := a.ps(context.Background(), cfg, nil, []string{"--format", "json"}); err != nil {
+		t.Fatal(err)
+	}
+	var absent psReport
+	if err := json.Unmarshal(out.Bytes(), &absent); err != nil || absent.Topology.State != "absent" || absent.Network.State != "absent" {
+		t.Fatalf("absent report = %#v, %v", absent, err)
+	}
+	out.Reset()
+	netState := &network.State{Topology: "lab"}
+	m := state.NewManifest("lab")
+	m.NetworkState, _ = json.Marshal(netState)
+	a.Network = driftNetwork{checkpointNetwork: checkpointNetwork{state: netState}, err: errors.New("wrong ownership")}
+	if err := a.ps(context.Background(), cfg, m, []string{"--format", "json"}); err != nil {
+		t.Fatal(err)
+	}
+	var drift psReport
+	if err := json.Unmarshal(out.Bytes(), &drift); err != nil {
+		t.Fatal(err)
+	}
+	if drift.Network.State != "drift" || drift.Network.DriftError != "wrong ownership" || strings.Contains(drift.Network.State, "wrong ownership") {
+		t.Fatalf("drift report = %#v", drift)
+	}
+}
+
+func testVMConfig() *config.Config {
+	one := 1
+	return &config.Config{Name: "lab", VMs: []*config.VM{{Name: "vm", CPU: &config.CPU{Model: "host", Sockets: &one, Cores: &one, Threads: &one}, MemoryBalloon: &config.MemoryBalloon{}}}}
+}
+
+func testHelperOverrides(t *testing.T) HelperOverrides {
+	t.Helper()
+	dir := t.TempDir()
+	write := func(name string, mode os.FileMode) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(name), mode); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	return HelperOverrides{QEMUSystem: write("qemu", 0o755), QEMUImg: write("qemu-img", 0o755), Xorriso: write("xorriso", 0o755), OVMFCode: write("code.fd", 0o644), OVMFVars: write("vars.fd", 0o644)}
+}
+
+func TestVMHelperOverridesReachPreflightAndRuntimeConsumers(t *testing.T) {
+	overrides := testHelperOverrides(t)
+	a := New(nil, nil)
+	a.defaults()
+	var got preflight.Options
+	a.Preflight = func(options preflight.Options) error { got = options; return nil }
+	if err := a.runtimePreflight(testVMConfig(), overrides); err != nil {
+		t.Fatal(err)
+	}
+	if got.Helpers.QEMUSystem != overrides.QEMUSystem || got.Helpers.QEMUImg != overrides.QEMUImg || got.Helpers.Xorriso != overrides.Xorriso || got.Helpers.OVMFCode != overrides.OVMFCode || got.Helpers.OVMFVars != overrides.OVMFVars {
+		t.Fatalf("preflight helpers = %#v", got.Helpers)
+	}
+	images, ok := a.Images.(*qemu.ImageManager)
+	if !ok || images.QEMUImg != overrides.QEMUImg {
+		t.Fatalf("image manager = %#v", a.Images)
+	}
+	seeds, ok := a.Seeds.(*cloudinit.ISOBuilder)
+	if !ok || seeds.Xorriso != overrides.Xorriso {
+		t.Fatalf("seed builder = %#v", a.Seeds)
+	}
+	if a.QEMUBuilder.Executable != overrides.QEMUSystem || a.OVMFCode != overrides.OVMFCode || a.OVMFVars != overrides.OVMFVars {
+		t.Fatalf("QEMU runtime helpers = %#v %q %q", a.QEMUBuilder, a.OVMFCode, a.OVMFVars)
+	}
+}
+
+func TestFailedVMPreflightOccursBeforeStateOrNetworkMutation(t *testing.T) {
+	overrides := testHelperOverrides(t)
+	parent, err := os.MkdirTemp("/tmp", "tlpf-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(parent) })
+	base := filepath.Join(parent, "not-created")
+	a := New(nil, nil)
+	a.Preflight = func(preflight.Options) error { return errors.New("KVM unavailable") }
+	if runErr := a.Run(context.Background(), Command{Name: "up", Topology: testVMConfig(), WorkingDir: base, Helpers: overrides}); runErr == nil || !strings.Contains(runErr.Error(), "KVM unavailable") {
+		t.Fatalf("preflight error = %v", runErr)
+	}
+	if _, err := os.Stat(base); !os.IsNotExist(err) {
+		t.Fatalf("failed preflight created state: %v", err)
 	}
 }

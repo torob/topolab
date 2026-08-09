@@ -95,6 +95,8 @@ jobs:
         run: go mod verify
 
       - name: Build production binary
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
         run: make build
 
       - name: Verify production binary
@@ -114,6 +116,7 @@ jobs:
           grep -F -- '-trimpath=true' <<<"$build_info"
           grep -F "vcs.revision=$TAG_SHA" <<<"$build_info"
           grep -F 'vcs.modified=false' <<<"$build_info"
+          test "$(bin/topolab version)" = "topolab ${{ steps.tag.outputs.version }}"
 
       - name: Package release
         id: package

@@ -34,8 +34,8 @@ def main(harness: Harness) -> None:
         not (harness.working_dir / ".topolab").exists(), "config modified runtime state"
     )
 
-    # Config is the sole unprivileged command. Exercise that contract when sudo
-    # identifies a real non-root caller.
+    # Config is topology-aware but unprivileged. Exercise that contract when
+    # sudo identifies a real non-root caller; version is covered by CLI tests.
     caller_uid, caller_gid = (
         int(os.environ.get("SUDO_UID", "0")),
         int(os.environ.get("SUDO_GID", "0")),
@@ -121,6 +121,41 @@ def main(harness: Harness) -> None:
     ):
         require(fragment in ps, f"ps omitted {fragment!r}")
     require("isolation=true" in ps, "management-host forwarding isolation is absent")
+    ps_json = json.loads(harness.run("ps", "--format", "json").stdout)
+    require(ps_json["schema_version"] == 1, "ps JSON schema version is wrong")
+    require(
+        ps_json["topology"]["state"] == "active"
+        and ps_json["network"]["state"] == "ready",
+        "ps JSON did not report an active ready topology",
+    )
+
+    router_identity = harness.run(
+        "router", "exec", "left", "--", "id", "-u"
+    ).stdout.strip()
+    require(router_identity == "0", "router exec did not default to root")
+    for command in (("ip", "link", "show"), ("nft", "list", "tables"), ("tc", "qdisc", "show")):
+        harness.run("router", "exec", "left", "--", *command)
+    require(
+        harness.run(
+            "router", "exec", "left", "--cwd", "/tmp", "--", "pwd"
+        ).stdout.strip()
+        == "/tmp",
+        "router exec --cwd was ignored",
+    )
+    require(
+        harness.run(
+            "router", "exec", "left", "--", "cat", input="router-stdio"
+        ).stdout
+        == "router-stdio",
+        "router exec lost stdio",
+    )
+    require(
+        harness.run(
+            "router", "exec", "left", "--", "sh", "-c", "exit 41", check=False
+        ).returncode
+        == 41,
+        "router exec did not propagate child exit status",
+    )
 
     identity = harness.exec(
         "sh",
@@ -129,6 +164,13 @@ def main(harness: Harness) -> None:
     )
     expected_uid = os.environ.get("SUDO_UID", "0")
     expected_gid = os.environ.get("SUDO_GID", "0")
+    require(
+        harness.run(
+            "router", "exec", "left", "--user", expected_uid, "--", "id", "-u"
+        ).stdout.strip()
+        == expected_uid,
+        "router exec --user did not select the requested account",
+    )
     lines = identity.stdout.splitlines()
     require(
         lines[:2] == [expected_uid, expected_gid],
@@ -172,6 +214,34 @@ def main(harness: Harness) -> None:
         marker.unlink(missing_ok=True)
         if supervisor.poll() is None:
             supervisor.kill()
+
+    router_marker = Path(f"/tmp/topolab-e2e-router-signal-{os.getpid()}")
+    router_marker.unlink(missing_ok=True)
+    router_signal_command = harness.command(
+        "router",
+        "exec",
+        "left",
+        "--",
+        "sh",
+        "-c",
+        'trap "exit 24" TERM; : > "$1"; while :; do sleep 1; done',
+        "sh",
+        str(router_marker),
+    )
+    router_supervisor = subprocess.Popen(
+        router_signal_command, env=harness.environment
+    )
+    try:
+        wait_for("router exec signal child", router_marker.exists, timeout=10, interval=0.05)
+        router_supervisor.terminate()
+        require(
+            router_supervisor.wait(timeout=10) == 24,
+            "router exec did not forward SIGTERM status",
+        )
+    finally:
+        router_marker.unlink(missing_ok=True)
+        if router_supervisor.poll() is None:
+            router_supervisor.kill()
 
     counters_before = harness.counters("left-lan")
     capture = harness.popen(

@@ -12,8 +12,19 @@ import (
 	"time"
 )
 
-var runtimeCommands = []string{
-	"qemu-system-x86_64", "qemu-img", "ip", "bridge", "tc", "nft", "xorriso",
+var networkCommands = []string{"ip", "bridge", "tc", "nft"}
+
+const (
+	DefaultOVMFCode = "/usr/share/OVMF/OVMF_CODE_4M.fd"
+	DefaultOVMFVars = "/usr/share/OVMF/OVMF_VARS_4M.fd"
+)
+
+type HelperPaths struct {
+	QEMUSystem string
+	QEMUImg    string
+	OVMFCode   string
+	OVMFVars   string
+	Xorriso    string
 }
 
 type Options struct {
@@ -23,11 +34,80 @@ type Options struct {
 	OpenKVM         func() error
 	CommandOutput   func(string, ...string) ([]byte, error)
 	NeedsDNSMasq    bool
-	RequireFirmware bool
+	RequireVM       bool
+	RequireFirmware bool // Deprecated compatibility alias for RequireVM.
+	Helpers         HelperPaths
+	HelpersResolved bool
 	CPUModels       []string
 	DeviceModels    []string
 	CPUPlans        []CPUPlan
 	ProbeCPUPlan    func(CPUPlan) error
+}
+
+func ResolveHelperPaths(requireVM bool, paths HelperPaths, lookPath func(string) (string, error), stat func(string) (os.FileInfo, error)) (HelperPaths, error) {
+	if lookPath == nil {
+		lookPath = exec.LookPath
+	}
+	if stat == nil {
+		stat = os.Stat
+	}
+	if !requireVM {
+		return paths, nil
+	}
+	resolveExecutable := func(label, value, fallback string) (string, error) {
+		explicit := value != ""
+		if value == "" {
+			value = fallback
+		}
+		resolved, err := lookPath(value)
+		if err != nil {
+			return "", fmt.Errorf("required command %q is unavailable: %w", label, err)
+		}
+		if !explicit {
+			return resolved, nil
+		}
+		info, err := stat(resolved)
+		if err != nil {
+			return "", fmt.Errorf("required executable %q: %w", resolved, err)
+		}
+		if !info.Mode().IsRegular() {
+			return "", fmt.Errorf("required executable %q is not a regular file", resolved)
+		}
+		if info.Mode().Perm()&0o111 == 0 {
+			return "", fmt.Errorf("required executable %q is not executable", resolved)
+		}
+		return resolved, nil
+	}
+	var err error
+	if paths.QEMUSystem, err = resolveExecutable("qemu-system-x86_64", paths.QEMUSystem, "qemu-system-x86_64"); err != nil {
+		return paths, err
+	}
+	if paths.QEMUImg, err = resolveExecutable("qemu-img", paths.QEMUImg, "qemu-img"); err != nil {
+		return paths, err
+	}
+	if paths.Xorriso, err = resolveExecutable("xorriso", paths.Xorriso, "xorriso"); err != nil {
+		return paths, err
+	}
+	for _, firmware := range []struct {
+		label    string
+		value    *string
+		fallback string
+	}{{"OVMF code", &paths.OVMFCode, DefaultOVMFCode}, {"OVMF variables", &paths.OVMFVars, DefaultOVMFVars}} {
+		if *firmware.value == "" {
+			*firmware.value = firmware.fallback
+		}
+		info, statErr := stat(*firmware.value)
+		if statErr != nil {
+			return paths, fmt.Errorf("required %s firmware %q: %w", firmware.label, *firmware.value, statErr)
+		}
+		if !info.Mode().IsRegular() {
+			return paths, fmt.Errorf("required %s firmware %q is not a regular file", firmware.label, *firmware.value)
+		}
+		if info.Mode().Perm()&0o444 == 0 {
+			return paths, fmt.Errorf("required %s firmware %q is not readable", firmware.label, *firmware.value)
+		}
+	}
+	return paths, nil
 }
 
 type CPUPlan struct {
@@ -59,19 +139,28 @@ func Runtime(opts Options) error {
 			return exec.Command(name, args...).CombinedOutput()
 		}
 	}
-	if opts.ProbeCPUPlan == nil {
-		opts.ProbeCPUPlan = probeCPUPlan
-	}
 	if opts.EUID() != 0 {
 		return errors.New("runtime commands require effective UID 0")
 	}
-	commands := append([]string(nil), runtimeCommands...)
+	commands := append([]string(nil), networkCommands...)
 	if opts.NeedsDNSMasq {
 		commands = append(commands, "dnsmasq")
 	}
 	for _, command := range commands {
 		if _, err := opts.LookPath(command); err != nil {
 			return fmt.Errorf("required command %q is unavailable: %w", command, err)
+		}
+	}
+	requireVM := opts.RequireVM || opts.RequireFirmware
+	if !requireVM {
+		return nil
+	}
+	helpers := opts.Helpers
+	if !opts.HelpersResolved {
+		var err error
+		helpers, err = ResolveHelperPaths(true, helpers, opts.LookPath, opts.Stat)
+		if err != nil {
+			return err
 		}
 	}
 	info, err := opts.Stat("/dev/kvm")
@@ -84,8 +173,8 @@ func Runtime(opts Options) error {
 	if err := opts.OpenKVM(); err != nil {
 		return fmt.Errorf("open /dev/kvm read/write: %w", err)
 	}
-	if opts.RequireFirmware {
-		for _, path := range []string{"/usr/share/OVMF/OVMF_CODE_4M.fd", "/usr/share/OVMF/OVMF_VARS_4M.fd"} {
+	if requireVM {
+		for _, path := range []string{helpers.OVMFCode, helpers.OVMFVars} {
 			info, err := opts.Stat(path)
 			if err != nil {
 				return fmt.Errorf("required OVMF firmware %q: %w", path, err)
@@ -96,7 +185,7 @@ func Runtime(opts Options) error {
 		}
 	}
 	if len(opts.CPUModels) > 0 {
-		out, err := opts.CommandOutput("qemu-system-x86_64", "-cpu", "help")
+		out, err := opts.CommandOutput(helpers.QEMUSystem, "-cpu", "help")
 		if err != nil {
 			return fmt.Errorf("probe QEMU CPU models: %w: %s", err, out)
 		}
@@ -108,7 +197,7 @@ func Runtime(opts Options) error {
 		}
 	}
 	if len(opts.DeviceModels) > 0 {
-		out, err := opts.CommandOutput("qemu-system-x86_64", "-device", "help")
+		out, err := opts.CommandOutput(helpers.QEMUSystem, "-device", "help")
 		if err != nil {
 			return fmt.Errorf("probe QEMU device models: %w: %s", err, out)
 		}
@@ -120,7 +209,11 @@ func Runtime(opts Options) error {
 		}
 	}
 	for _, plan := range opts.CPUPlans {
-		if err := opts.ProbeCPUPlan(plan); err != nil {
+		probe := opts.ProbeCPUPlan
+		if probe == nil {
+			probe = func(plan CPUPlan) error { return probeCPUPlanWithExecutable(helpers.QEMUSystem, plan) }
+		}
+		if err := probe(plan); err != nil {
 			return fmt.Errorf("QEMU/KVM cannot run CPU plan %s sockets=%d cores=%d threads=%d: %w", plan.Model, plan.Sockets, plan.Cores, plan.Threads, err)
 		}
 	}
@@ -128,6 +221,10 @@ func Runtime(opts Options) error {
 }
 
 func probeCPUPlan(plan CPUPlan) error {
+	return probeCPUPlanWithExecutable("qemu-system-x86_64", plan)
+}
+
+func probeCPUPlanWithExecutable(executable string, plan CPUPlan) error {
 	if plan.Model == "" || plan.Sockets <= 0 || plan.Cores <= 0 || plan.Threads <= 0 {
 		return errors.New("invalid CPU plan")
 	}
@@ -143,7 +240,7 @@ func probeCPUPlan(plan CPUPlan) error {
 		"-m", "128", "-display", "none", "-nodefaults", "-no-user-config",
 		"-serial", "none", "-monitor", "none", "-S", "-qmp", "stdio",
 	}
-	cmd := exec.CommandContext(ctx, "qemu-system-x86_64", args...)
+	cmd := exec.CommandContext(ctx, executable, args...)
 	cmd.Stdin = strings.NewReader(`{"execute":"qmp_capabilities"}` + "\n" + `{"execute":"quit"}` + "\n")
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() != nil {

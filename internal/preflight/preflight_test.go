@@ -79,3 +79,62 @@ func TestRuntimeRequiresDNSMasqOnlyWhenRequested(t *testing.T) {
 		t.Fatal("expected error")
 	}
 }
+
+func TestRouterOnlyRuntimeSkipsVMRequirements(t *testing.T) {
+	opts := validOptions()
+	opts.RequireFirmware = false
+	opts.RequireVM = false
+	opts.LookPath = func(name string) (string, error) {
+		if name == "qemu-system-x86_64" || name == "qemu-img" || name == "xorriso" {
+			t.Fatalf("looked up VM-only command %s", name)
+		}
+		return "/tools/" + name, nil
+	}
+	opts.Stat = func(string) (os.FileInfo, error) { t.Fatal("stat VM requirement"); return nil, nil }
+	opts.OpenKVM = func() error { t.Fatal("opened KVM"); return nil }
+	if err := Runtime(opts); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestExplicitHelperOverridesMustBeUsableRegularFiles(t *testing.T) {
+	paths := HelperPaths{QEMUSystem: "/qemu", QEMUImg: "/img", Xorriso: "/xorriso", OVMFCode: "/code", OVMFVars: "/vars"}
+	look := func(name string) (string, error) { return name, nil }
+	stat := func(path string) (os.FileInfo, error) { return fakeInfo{mode: 0o755}, nil }
+	if got, err := ResolveHelperPaths(true, paths, look, stat); err != nil || got != paths {
+		t.Fatalf("valid overrides = %#v, %v", got, err)
+	}
+	for _, bad := range []struct {
+		path string
+		mode os.FileMode
+	}{{"/qemu", 0o644}, {"/img", os.ModeDir | 0o755}, {"/code", 0o000}} {
+		_, err := ResolveHelperPaths(true, paths, look, func(path string) (os.FileInfo, error) {
+			if path == bad.path {
+				return fakeInfo{mode: bad.mode}, nil
+			}
+			return fakeInfo{mode: 0o755}, nil
+		})
+		if err == nil {
+			t.Fatalf("accepted %s mode %v", bad.path, bad.mode)
+		}
+	}
+}
+
+func TestRuntimeUsesSelectedQEMUForCapabilityProbes(t *testing.T) {
+	opts := validOptions()
+	opts.Helpers = HelperPaths{QEMUSystem: "/selected/qemu", QEMUImg: "/selected/img", Xorriso: "/selected/xorriso", OVMFCode: "/selected/code", OVMFVars: "/selected/vars"}
+	opts.HelpersResolved = true
+	opts.CPUModels = []string{"host"}
+	opts.DeviceModels = []string{"virtio-net-pci"}
+	var commands []string
+	opts.CommandOutput = func(name string, args ...string) ([]byte, error) {
+		commands = append(commands, name+" "+args[0])
+		return []byte("virtio-net-pci"), nil
+	}
+	if err := Runtime(opts); err != nil {
+		t.Fatal(err)
+	}
+	if len(commands) != 2 || commands[0] != "/selected/qemu -cpu" || commands[1] != "/selected/qemu -device" {
+		t.Fatalf("capability commands = %v", commands)
+	}
+}
