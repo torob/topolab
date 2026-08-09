@@ -127,6 +127,15 @@ func TestExecIdentityArgumentPreservesManagementDefaultAndRootsRouters(t *testin
 	}
 }
 
+func TestExecCapabilityPolicyRetainsOnlyRootCapabilities(t *testing.T) {
+	if shouldClearExecCapabilities(execIdentity{UID: 0}) {
+		t.Fatal("root identity would lose required capabilities")
+	}
+	if !shouldClearExecCapabilities(execIdentity{UID: 1000}) {
+		t.Fatal("non-root identity would retain capabilities")
+	}
+}
+
 type fakeIdentityLookup struct {
 	byName map[string]*user.User
 	byID   map[string]*user.User

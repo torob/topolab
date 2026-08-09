@@ -171,6 +171,23 @@ def main(harness: Harness) -> None:
         == expected_uid,
         "router exec --user did not select the requested account",
     )
+    if expected_uid != "0":
+        require(
+            harness.run(
+                "router",
+                "exec",
+                "left",
+                "--user",
+                expected_uid,
+                "--cwd",
+                "/root",
+                "--",
+                "true",
+                check=False,
+            ).returncode
+            == 126,
+            "non-root router exec entered an inaccessible cwd",
+        )
     lines = identity.stdout.splitlines()
     require(
         lines[:2] == [expected_uid, expected_gid],

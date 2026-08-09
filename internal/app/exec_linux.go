@@ -376,8 +376,9 @@ func filterEnvironment(env []string, blocked map[string]bool) []string {
 }
 
 // RunExecChild permanently enters the selected managed namespace, assumes the
-// selected local identity, clears inherited capabilities, and execs argv.
-// A root router identity regains the capabilities Linux grants UID 0 at exec.
+// selected local identity, and execs argv. Non-root identities clear inherited
+// capabilities; UID 0 retains the capabilities intentionally required for
+// router administration and protected cwd/path resolution.
 func RunExecChild(configFile *os.File, argv []string, stderr *os.File) int {
 	if len(argv) == 0 {
 		fmt.Fprintln(stderr, "topolab: internal exec child has no command")
@@ -421,7 +422,7 @@ func RunExecChild(configFile *os.File, argv []string, stderr *os.File) int {
 	if err == nil {
 		err = unix.Setresuid(int(config.Identity.UID), int(config.Identity.UID), int(config.Identity.UID))
 	}
-	if err == nil {
+	if err == nil && shouldClearExecCapabilities(config.Identity) {
 		header := unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3}
 		var data [2]unix.CapUserData
 		err = unix.Capset(&header, &data[0])
@@ -439,4 +440,8 @@ func RunExecChild(configFile *os.File, argv []string, stderr *os.File) int {
 	}
 	fmt.Fprintf(stderr, "topolab: exec %s: %v\n", argv[0], err)
 	return 127
+}
+
+func shouldClearExecCapabilities(identity execIdentity) bool {
+	return identity.UID != 0
 }
