@@ -12,7 +12,7 @@ connectivity scenarios. The public contract is [`spec.md`](spec.md).
 
 ## Install
 
-Go 1.26 or newer is required to install TopoLab from source:
+Go 1.26.6 or newer is required to install TopoLab from source:
 
 ```sh
 go install github.com/torob/topolab/cmd/topolab@latest

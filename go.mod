@@ -1,6 +1,6 @@
 module github.com/torob/topolab
 
-go 1.26
+go 1.26.6
 
 require (
 	golang.org/x/crypto v0.54.0
