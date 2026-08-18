@@ -24,6 +24,8 @@ vms:
     boot: {order: [disk, network], menu: true, strict: true}
     ssh_authorized_keys:
       - "${TOPOLAB_SSH_PUBLIC_KEY:?set TOPOLAB_SSH_PUBLIC_KEY to an OpenSSH public key}"
+    root_ca_certificates:
+      - pem: "${TOPOLAB_ROOT_CA_PEM:?set TOPOLAB_ROOT_CA_PEM to a self-signed Root CA certificate}"
     interfaces:
       - name: primary
         model: virtio
@@ -42,6 +44,8 @@ vms:
     boot: {order: [network, disk]}
     ssh_authorized_keys:
       - "${TOPOLAB_SSH_PUBLIC_KEY:?set TOPOLAB_SSH_PUBLIC_KEY to an OpenSSH public key}"
+    root_ca_certificates:
+      - path: "${TOPOLAB_ROOT_CA_PATH:?set TOPOLAB_ROOT_CA_PATH to a self-signed Root CA certificate file}"
     interfaces:
       - name: primary
         ipv4:

@@ -81,6 +81,12 @@ func normalize(c *Config, baseDir string) error {
 		if vm.SSHAuthorizedKeys == nil {
 			vm.SSHAuthorizedKeys = []string{}
 		}
+		if vm.RootCACertificates == nil {
+			vm.RootCACertificates = []*RootCACertificate{}
+		}
+		if err := normalizeRootCACertificates(name, vm.RootCACertificates, absBase); err != nil {
+			return err
+		}
 		if vm.Interfaces == nil {
 			vm.Interfaces = []*VMInterface{}
 		}

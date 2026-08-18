@@ -133,7 +133,8 @@ image from pinned release `20260720`, verify its SHA-256, and cache it under
 `TOPOLAB_TEMPLATE` to use another compatible image, `TOPOLAB_BINARY` to select
 the executable, or `TOPOLAB_E2E_KEEP=1` to retain a successful temporary run.
 Every failure retains its temporary directory and prints the location with
-diagnostics. The suites generate and export their own ephemeral SSH key.
+diagnostics. The suites generate and export their own ephemeral SSH key, and
+the VM-features suite also generates its own ephemeral Root CA.
 
 ## Examples
 
@@ -151,7 +152,8 @@ the matching `e2e/` directory.
   interfaces, router VLANs, DHCP/DNS, router-local NAT, and external access.
 - [`vm-features`](examples/vm-features/topology.yml) demonstrates ballooning,
   the guest-agent channel, serial logs, multiqueue and non-VirtIO NICs,
-  additional disks, boot policy, and selected VM lifecycle operations.
+  additional disks, inline and file-backed Root CA trust, boot policy, and
+  selected VM lifecycle operations.
 
 CI syntax-checks the Python and shell assets and normalizes all four examples
 with placeholders. It intentionally does not run privileged root/KVM E2E.

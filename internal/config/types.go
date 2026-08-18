@@ -34,18 +34,25 @@ type ManagementHostIPv4 struct {
 }
 
 type VM struct {
-	Name              string         `yaml:"name"`
-	Template          string         `yaml:"template"`
-	CPU               *CPU           `yaml:"cpu,omitempty"`
-	MemoryMB          int            `yaml:"memory_mb"`
-	MemoryBalloon     *MemoryBalloon `yaml:"memory_balloon,omitempty"`
-	RootDisk          RootDisk       `yaml:"root_disk"`
-	AdditionalDisks   []*Disk        `yaml:"additional_disks"`
-	GuestAgent        bool           `yaml:"guest_agent"`
-	Boot              Boot           `yaml:"boot"`
-	SSHAuthorizedKeys []string       `yaml:"ssh_authorized_keys"`
-	Interfaces        []*VMInterface `yaml:"interfaces"`
-	VCPUs             int            `yaml:"-"`
+	Name               string               `yaml:"name"`
+	Template           string               `yaml:"template"`
+	CPU                *CPU                 `yaml:"cpu,omitempty"`
+	MemoryMB           int                  `yaml:"memory_mb"`
+	MemoryBalloon      *MemoryBalloon       `yaml:"memory_balloon,omitempty"`
+	RootDisk           RootDisk             `yaml:"root_disk"`
+	AdditionalDisks    []*Disk              `yaml:"additional_disks"`
+	GuestAgent         bool                 `yaml:"guest_agent"`
+	Boot               Boot                 `yaml:"boot"`
+	SSHAuthorizedKeys  []string             `yaml:"ssh_authorized_keys"`
+	RootCACertificates []*RootCACertificate `yaml:"root_ca_certificates"`
+	Interfaces         []*VMInterface       `yaml:"interfaces"`
+	VCPUs              int                  `yaml:"-"`
+}
+
+type RootCACertificate struct {
+	PEM          string `yaml:"pem,omitempty"`
+	Path         string `yaml:"path,omitempty"`
+	CanonicalPEM string `yaml:"-" json:"-"`
 }
 
 type CPU struct {

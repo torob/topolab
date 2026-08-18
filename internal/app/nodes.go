@@ -17,8 +17,9 @@ import (
 )
 
 type bootstrapSnapshot struct {
-	AuthorizedKeys []string          `json:"authorized_keys"`
-	Network        cloudinit.Network `json:"network"`
+	AuthorizedKeys     []string          `json:"authorized_keys"`
+	Network            cloudinit.Network `json:"network"`
+	RootCACertificates []string          `json:"root_ca_certificates,omitempty"`
 }
 
 func (a *App) desiredNodes(cfg *config.Config, layout state.Layout, templates map[string]qemu.TemplateInfo) (map[string]*state.Node, error) {
@@ -27,7 +28,7 @@ func (a *App) desiredNodes(cfg *config.Config, layout state.Layout, templates ma
 		name, tmpl := vm.Name, templates[vm.Template]
 		dir, _ := layout.NodeDir(name)
 		storage, _ := state.Hash(struct{ Path, Digest string }{tmpl.Path, tmpl.Digest})
-		snapshot := bootstrapSnapshot{AuthorizedKeys: append([]string(nil), vm.SSHAuthorizedKeys...), Network: vmCloudNetwork(cfg, name, vm)}
+		snapshot := bootstrapSnapshot{AuthorizedKeys: append([]string(nil), vm.SSHAuthorizedKeys...), Network: vmCloudNetwork(cfg, name, vm), RootCACertificates: vmRootCACertificates(vm)}
 		bootstrap, _ := state.Hash(snapshot)
 		restart, _ := state.Hash(vmRestartSnapshot(cfg, name, vm))
 		raw, _ := json.Marshal(snapshot)
@@ -281,8 +282,16 @@ func seedFor(cfg *config.Config, name string, n *state.Node) (cloudinit.Seed, er
 	if err := json.Unmarshal(n.BootstrapSnapshot, &snapshot); err != nil {
 		return cloudinit.Seed{}, err
 	}
-	user := cloudinit.UserData{Hostname: name, AuthorizedKeys: snapshot.AuthorizedKeys}
+	user := cloudinit.UserData{Hostname: name, AuthorizedKeys: snapshot.AuthorizedKeys, RootCACertificates: snapshot.RootCACertificates}
 	return cloudinit.Render(cloudinit.InstanceID(cfg.Name, name, n.StorageIdentityHash, n.BootstrapHash), user, snapshot.Network)
+}
+
+func vmRootCACertificates(vm *config.VM) []string {
+	var out []string
+	for _, certificate := range vm.RootCACertificates {
+		out = append(out, certificate.CanonicalPEM)
+	}
+	return out
 }
 
 func (a *App) startNode(ctx context.Context, cfg *config.Config, layout state.Layout, manifest *state.Manifest, name string, n *state.Node, netState *network.State) error {

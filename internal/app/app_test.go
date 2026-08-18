@@ -196,6 +196,61 @@ func TestWriteOnceBootstrapRejectedBeforeImageInspection(t *testing.T) {
 	}
 }
 
+func TestRootCACertificatesPreserveLegacyBootstrapAndAreWriteOnce(t *testing.T) {
+	legacy := struct {
+		AuthorizedKeys []string          `json:"authorized_keys"`
+		Network        cloudinit.Network `json:"network"`
+	}{AuthorizedKeys: []string{"key"}, Network: cloudinit.Network{}}
+	current := bootstrapSnapshot{AuthorizedKeys: []string{"key"}, Network: cloudinit.Network{}}
+	legacyJSON, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentJSON, err := json.Marshal(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(currentJSON) != string(legacyJSON) {
+		t.Fatalf("empty Root CA field changed legacy snapshot:\nlegacy=%s\ncurrent=%s", legacyJSON, currentJSON)
+	}
+	legacyHash, _ := state.Hash(legacy)
+	currentHash, _ := state.Hash(current)
+	if currentHash != legacyHash {
+		t.Fatalf("empty Root CA field changed bootstrap hash: %s != %s", currentHash, legacyHash)
+	}
+
+	withCA := bootstrapSnapshot{AuthorizedKeys: []string{"key"}, Network: cloudinit.Network{}, RootCACertificates: []string{"canonical certificate"}}
+	caHash, _ := state.Hash(withCA)
+	manifest := state.NewManifest("lab")
+	manifest.Nodes["vm"] = &state.Node{Kind: "vm", StorageIdentityHash: "storage", BootstrapHash: currentHash}
+	desired := map[string]*state.Node{"vm": {Kind: "vm", StorageIdentityHash: "storage", BootstrapHash: caHash}}
+	if err := New(nil, nil).validateExisting(context.Background(), manifest, desired); err == nil || !strings.Contains(err.Error(), "write-once") {
+		t.Fatalf("Root CA bootstrap change error = %v", err)
+	}
+}
+
+func TestSeedReconstructionUsesRecordedRootCACertificates(t *testing.T) {
+	snapshot := bootstrapSnapshot{RootCACertificates: []string{"-----BEGIN CERTIFICATE-----\nrecorded\n-----END CERTIFICATE-----\n"}}
+	raw, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := &state.Node{StorageIdentityHash: "storage", BootstrapHash: "bootstrap", BootstrapSnapshot: raw}
+	seed, err := seedFor(&config.Config{Name: "lab"}, "vm", node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(seed.UserData), "recorded") {
+		t.Fatalf("reconstructed seed omitted recorded Root CA:\n%s", seed.UserData)
+	}
+
+	first := vmRootCACertificates(&config.VM{RootCACertificates: []*config.RootCACertificate{{Path: "/first.pem", CanonicalPEM: "same"}}})
+	second := vmRootCACertificates(&config.VM{RootCACertificates: []*config.RootCACertificate{{Path: "/second.pem", CanonicalPEM: "same"}}})
+	if len(first) != 1 || len(second) != 1 || first[0] != second[0] {
+		t.Fatalf("certificate source path affected bootstrap content: %v != %v", first, second)
+	}
+}
+
 func TestTranslateNetworkPreservesTransitAllocation(t *testing.T) {
 	cfg := &config.Config{Name: "lab", Routers: []*config.Router{{Name: "r", Interfaces: []*config.RouterInterface{{Name: "wan", MTU: 1500, External: &config.External{Sources: []string{"10.0.0.0/24"}, EgressInterface: "eth0", SourceIP: "192.0.2.2"}}}}}}
 	prior := &network.State{External: []network.ResolvedExternal{{External: network.External{Router: "r", Interface: "wan", TransitPrefix: "198.18.1.0/30", RouterAddress: "198.18.1.1", HostAddress: "198.18.1.2"}}}}

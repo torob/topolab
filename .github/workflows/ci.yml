@@ -66,9 +66,17 @@ jobs:
       - name: Normalize example configurations
         run: |
           ssh-keygen -q -t ed25519 -N '' -f "$RUNNER_TEMP/example-key"
+          openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 2 \
+            -subj '/CN=TopoLab CI Root CA' \
+            -addext 'basicConstraints=critical,CA:TRUE' \
+            -addext 'keyUsage=critical,keyCertSign,cRLSign' \
+            -keyout "$RUNNER_TEMP/root-ca.key" -out "$RUNNER_TEMP/root-ca.pem" \
+            >/dev/null 2>&1
           python3 -c 'import struct,sys; open(sys.argv[1], "wb").write(struct.pack(">4sIQQ", b"QFI\xfb", 3, 0, 0))' "$RUNNER_TEMP/placeholder.qcow2"
           export TOPOLAB_TEMPLATE="$RUNNER_TEMP/placeholder.qcow2"
           export TOPOLAB_SSH_PUBLIC_KEY="$(cat "$RUNNER_TEMP/example-key.pub")"
+          export TOPOLAB_ROOT_CA_PEM="$(cat "$RUNNER_TEMP/root-ca.pem")"
+          export TOPOLAB_ROOT_CA_PATH="$RUNNER_TEMP/root-ca.pem"
           for topology in examples/*/topology.yml; do
             ./bin/topolab --file "$topology" \
               --working-dir "$RUNNER_TEMP/config" config >/dev/null

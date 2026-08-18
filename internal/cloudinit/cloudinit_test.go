@@ -24,12 +24,38 @@ func TestRenderDeterministicNoCloud(t *testing.T) {
 		}
 	}
 	user := string(seed.UserData)
-	if !strings.Contains(user, "ssh_deletekeys: false") || strings.Contains(user, "machine-id") {
+	if !strings.Contains(user, "ssh_deletekeys: false") || strings.Contains(user, "machine-id") || strings.Contains(user, "ca_certs:") {
 		t.Fatalf("bad user data:\n%s", user)
 	}
 	again, _ := Render("instance", UserData{Hostname: "vm", AuthorizedKeys: []string{"ssh-ed25519 AAA key"}}, in)
 	if seed.Digest() != again.Digest() {
 		t.Fatal("digest is not deterministic")
+	}
+}
+
+func TestRenderTrustedRootCACertificates(t *testing.T) {
+	certificates := []string{
+		"-----BEGIN CERTIFICATE-----\nfirst\n-----END CERTIFICATE-----\n",
+		"-----BEGIN CERTIFICATE-----\nsecond\n-----END CERTIFICATE-----\n",
+	}
+	seed, err := Render("instance", UserData{Hostname: "vm", RootCACertificates: certificates}, Network{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	user := string(seed.UserData)
+	for _, want := range []string{
+		"ca_certs:\n",
+		"  remove_defaults: false\n",
+		"  trusted:\n",
+		`    - "-----BEGIN CERTIFICATE-----\nfirst\n-----END CERTIFICATE-----\n"`,
+		`    - "-----BEGIN CERTIFICATE-----\nsecond\n-----END CERTIFICATE-----\n"`,
+	} {
+		if !strings.Contains(user, want) {
+			t.Errorf("missing %q in:\n%s", want, user)
+		}
+	}
+	if strings.Contains(user, "remove_defaults: true") {
+		t.Fatalf("default trust roots would be removed:\n%s", user)
 	}
 }
 

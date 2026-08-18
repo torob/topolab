@@ -54,8 +54,59 @@ def disk_device(harness: Harness, name: str) -> str:
     return result
 
 
+def make_root_ca(harness: Harness, name: str) -> Path:
+    certificate = harness.test_dir / f"{name}.pem"
+    private_key = harness.test_dir / f"{name}.key"
+    subprocess.run(
+        (
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-sha256",
+            "-nodes",
+            "-days",
+            "2",
+            "-subj",
+            f"/CN=TopoLab E2E {name}",
+            "-addext",
+            "basicConstraints=critical,CA:TRUE",
+            "-addext",
+            "keyUsage=critical,keyCertSign,cRLSign",
+            "-keyout",
+            str(private_key),
+            "-out",
+            str(certificate),
+        ),
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return certificate
+
+
+def verify_guest_trust(harness: Harness, address: str, certificate: Path) -> None:
+    guest_path = "/tmp/topolab-e2e-root-ca.pem"
+    harness.install_guest_file(address, certificate, guest_path, mode="0644")
+    result = harness.ssh(
+        address,
+        "openssl",
+        "verify",
+        "-CAfile",
+        "/etc/ssl/certs/ca-certificates.crt",
+        guest_path,
+    )
+    require(result.stdout.strip() == f"{guest_path}: OK", "guest does not trust Root CA")
+    harness.ssh(address, "sudo", "rm", "-f", guest_path)
+
+
 def main(harness: Harness) -> None:
     before = root_network_snapshot()
+    root_ca = make_root_ca(harness, "root-ca")
+    replacement_ca = make_root_ca(harness, "replacement-root-ca")
+    harness.environment["TOPOLAB_ROOT_CA_PEM"] = root_ca.read_text(encoding="utf-8")
+    harness.environment["TOPOLAB_ROOT_CA_PATH"] = str(root_ca)
     normalized = harness.run("config").stdout
     for fragment in (
         "target_mb: 3072",
@@ -64,6 +115,8 @@ def main(harness: Harness) -> None:
         "bus: nvme",
         "order:\n            - disk\n            - network",
         "guest_agent: true",
+        "root_ca_certificates:",
+        f"path: {root_ca}",
     ):
         require(
             fragment in normalized, f"normalized VM feature config omitted {fragment!r}"
@@ -73,6 +126,8 @@ def main(harness: Harness) -> None:
     harness.wait_ssh(LIFECYCLE)
     initial_feature_pid = running_pid(harness, "feature-rich")
     initial_lifecycle_pid = running_pid(harness, "lifecycle")
+    verify_guest_trust(harness, FEATURE, root_ca)
+    verify_guest_trust(harness, LIFECYCLE, root_ca)
 
     argv = Path(f"/proc/{initial_feature_pid}/cmdline").read_bytes().split(b"\0")
     command_line = " ".join(item.decode(errors="replace") for item in argv)
@@ -201,6 +256,23 @@ def main(harness: Harness) -> None:
     )
     harness.replace_topology("192.0.2.12/24", "192.0.2.10/24")
 
+    # Trusted Root CAs are also write-once guest bootstrap inputs.
+    harness.environment["TOPOLAB_ROOT_CA_PEM"] = replacement_ca.read_text(
+        encoding="utf-8"
+    )
+    rejected = harness.run("up", check=False)
+    require(
+        rejected.returncode != 0
+        and "bootstrap configuration is write-once" in rejected.stderr,
+        "up accepted a Root CA bootstrap change",
+    )
+    require(
+        running_pid(harness, "feature-rich") == initial_feature_pid
+        and running_pid(harness, "lifecycle") == initial_lifecycle_pid,
+        "Root CA bootstrap rejection disturbed a running VM",
+    )
+    harness.environment["TOPOLAB_ROOT_CA_PEM"] = root_ca.read_text(encoding="utf-8")
+
     # Selected lifecycle commands affect only their named VM.
     harness.run("stop", "lifecycle")
     require(
@@ -270,5 +342,5 @@ if __name__ == "__main__":
         "vm-features",
         main,
         template=True,
-        required_tools=("tc", "bridge", "sysctl", "ssh"),
+        required_tools=("tc", "bridge", "sysctl", "ssh", "openssl"),
     )

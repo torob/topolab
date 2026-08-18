@@ -311,7 +311,7 @@ func TestParseDefaultsInterpolationAndMarshal(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(out)
-	for _, want := range []string{"management_host:", "interfaces: []", "memory_mb: 2048", "model: virtio", "queues: 1", "bus: scsi", "mtu: 1500"} {
+	for _, want := range []string{"management_host:", "interfaces: []", "root_ca_certificates: []", "memory_mb: 2048", "model: virtio", "queues: 1", "bus: scsi", "mtu: 1500"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("normalized YAML lacks %q:\n%s", want, text)
 		}

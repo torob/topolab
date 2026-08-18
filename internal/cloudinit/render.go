@@ -36,8 +36,9 @@ type Network struct {
 }
 
 type UserData struct {
-	Hostname       string
-	AuthorizedKeys []string
+	Hostname           string
+	AuthorizedKeys     []string
+	RootCACertificates []string
 }
 
 type Seed struct{ MetaData, UserData, NetworkConfig []byte }
@@ -81,6 +82,12 @@ func renderUserData(u UserData) ([]byte, error) {
 	b.WriteString("hostname: " + quote(u.Hostname) + "\n")
 	b.WriteString("preserve_hostname: false\n")
 	b.WriteString("ssh_deletekeys: false\n")
+	if len(u.RootCACertificates) > 0 {
+		b.WriteString("ca_certs:\n  remove_defaults: false\n  trusted:\n")
+		for _, certificate := range u.RootCACertificates {
+			b.WriteString("    - " + quote(certificate) + "\n")
+		}
+	}
 	b.WriteString("users:\n  - name: torob\n    lock_passwd: true\n    shell: /bin/bash\n    groups: [sudo]\n    sudo: ALL=(ALL) NOPASSWD:ALL\n    ssh_authorized_keys:\n")
 	if len(u.AuthorizedKeys) == 0 {
 		b.WriteString("      []\n")

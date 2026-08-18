@@ -380,6 +380,12 @@ vms:
       strict: false
     ssh_authorized_keys:
       - ssh-ed25519 AAAA... operator@example
+    root_ca_certificates:
+      - pem: |
+          -----BEGIN CERTIFICATE-----
+          ...
+          -----END CERTIFICATE-----
+      - path: certs/lab-root-ca.pem
     interfaces:
       - name: eth0
         model: virtio
@@ -398,6 +404,23 @@ and must be at least 128. Every VM must declare at least one interface and a
 non-empty `ssh_authorized_keys` list. Each entry must be a valid OpenSSH public
 key, and duplicate keys are invalid. The keys are installed for the locked-
 password `torob` bootstrap user.
+
+`root_ca_certificates` is an optional ordered list of self-signed X.509 Root
+CA certificates to add to the VM's system trust store. Each entry must set
+exactly one of `pem`, containing inline PEM text, or `path`, naming a PEM file.
+A relative path is resolved against the topology file's directory and is
+printed as an absolute path by `config`. A path must identify a readable
+regular file.
+
+Every source must contain exactly one `CERTIFICATE` PEM block and no other
+non-whitespace data. The certificate must have valid CA basic constraints,
+identical subject and issuer names, and a valid self-signature. Duplicate DER
+certificates within one VM are invalid, including duplicates supplied through
+different source forms. Certificate validity dates are not checked while
+loading the topology. TopoLab canonicalizes accepted certificates from their
+DER encoding and supplies them through cloud-init `ca_certs.trusted` with
+`remove_defaults: false`; it never handles the corresponding private keys or
+removes the template's default trust roots.
 
 `cpu` optionally controls the CPU model and topology exposed to the guest.
 `cpu.model` defaults to `host`, which uses KVM host passthrough. It may instead
@@ -532,13 +555,16 @@ configuration matches each base interface by MAC, assigns its configured
 interface name, and configures its VLANs, IPv4 addresses, DHCP clients, routes,
 and static DNS resolvers.
 
-VM interface and VLAN MTUs, layer-3 fields, and `ssh_authorized_keys` are
-write-once bootstrap inputs, not continuously reconciled guest configuration.
+VM interface and VLAN MTUs, layer-3 fields, `ssh_authorized_keys`, and
+`root_ca_certificates` are write-once bootstrap inputs, not continuously
+reconciled guest configuration.
 They are applied only when the VM's root overlay is first created. The manifest
 records their normalized values and a VM-bootstrap hash. While that root
 overlay exists, changing any guest MTU, address, DHCP setting, VLAN, route, DNS
-server, or authorized key in the topology file is a preflight error and no
-runtime state may be changed. The fields remain in the topology file as the
+server, authorized key, or effective Root CA content or order in the topology
+file is a preflight error and no runtime state may be changed. Changing only a
+Root CA source path while it still resolves to identical certificate DER is
+not a bootstrap change. The fields remain in the topology file as the
 historical bootstrap inputs; they do not describe or constrain the current
 guest state.
 
@@ -1093,8 +1119,9 @@ an image currently opened by a running QEMU process.
 
 The generated NoCloud seed contains `meta-data`, `user-data`, and
 `network-config`. For a VM, the seed contains only its hostname, locked-
-password `torob` user, initial authorized keys, and initial interface names,
-MTUs, VLANs, IPv4 configuration, routes, and DNS resolvers. Its instance ID
+password `torob` user, initial authorized keys, trusted Root CA certificates,
+and initial interface names, MTUs, VLANs, IPv4 configuration, routes, and DNS
+resolvers. Its instance ID
 incorporates the topology name, node name, storage-identity hash, and recorded
 VM-bootstrap hash. The seed and instance ID remain unchanged for the lifetime
 of that root overlay. The manifest retains the normalized bootstrap values and
@@ -1111,7 +1138,9 @@ guest machine ID, and must contain no package, service, Kubernetes, or
 application configuration.
 
 A compatible VM template must enable the NoCloud data source and cloud-init
-network rendering.
+network rendering. A VM using `root_ca_certificates` additionally requires the
+cloud-init CA certificates module and the guest OS trust-store tooling it
+invokes.
 
 VM shutdown first requests `system_powerdown` over QMP, waits up to 30
 seconds, then uses bounded TERM and KILL fallbacks. Before signaling, the tool
@@ -1197,9 +1226,9 @@ nftables details. Changing any combination of these properties must preserve
 the root overlay and every additional disk of every surviving VM.
 
 An attempted change to a VM's write-once guest MTU, address, DHCP, VLAN, route,
-DNS, or authorized-key bootstrap inputs follows the preflight rejection rule
-in Section 4.4.1. Rejection occurs before a VM is stopped or any host
-networking or disk is changed.
+DNS, authorized-key, or Root CA bootstrap inputs follows the preflight
+rejection rule in Section 4.4.1. Rejection occurs before a VM is stopped or any
+host networking or disk is changed.
 
 A network change may require an affected VM to stop and start when its
 presented NIC hardware or safe host-datapath reconciliation requires it. Such
@@ -1434,6 +1463,8 @@ implementation internals. At minimum it must verify:
   persistence, and ownership contracts;
 - each router is realized in its own owned network namespace, with no QEMU
   process, writable disk, NoCloud seed, or TAP interface;
+- inline and file-backed Root CAs are validated before mutation and become
+  trusted through the guest system CA bundle after initial bootstrap;
 - VM bootstrap values are applied initially and write-once changes are
   rejected without stopping the VM or changing a disk;
 - all documented network-only changes preserve the root overlay and every
