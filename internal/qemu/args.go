@@ -21,7 +21,7 @@ type Memory struct {
 type Firmware struct{ Code, Vars string }
 type DiskSpec struct {
 	Name, Path, Bus, BlockNode, Serial string
-	Format, Cache                      string
+	Format, Cache, AIO, BackingPath    string
 	Boot                               bool
 }
 type NICSpec struct {
@@ -161,15 +161,38 @@ func (b *Builder) Build(s NodeSpec) ([]string, error) {
 			return nil, fmt.Errorf("disk %s has unsupported cache policy %q", d.Name, cache)
 		}
 		cacheOptions := ",cache.direct=" + direct + ",cache.no-flush=off"
-		protocol := "driver=file,node-name=" + fileNode + ",filename=" + escapeComma(d.Path) + ",auto-read-only=on,discard=unmap" + cacheOptions
+		aio := d.AIO
+		if aio == "" {
+			aio = "threads"
+		}
+		if aio != "threads" && aio != "native" && aio != "io_uring" {
+			return nil, fmt.Errorf("disk %s has unsupported AIO policy %q", d.Name, aio)
+		}
+		if aio == "native" && direct != "on" {
+			return nil, fmt.Errorf("disk %s uses native AIO without direct I/O", d.Name)
+		}
+		aioOption := ",aio=" + aio
+		protocol := "driver=file,node-name=" + fileNode + ",filename=" + escapeComma(d.Path) + ",auto-read-only=on,discard=unmap" + cacheOptions + aioOption
 		if format == "raw" {
 			// LVM paths are block devices, which require QEMU's host_device
 			// protocol rather than the regular-file protocol.
-			protocol = "driver=host_device,node-name=" + fileNode + ",filename=" + escapeComma(d.Path) + cacheOptions
+			protocol = "driver=host_device,node-name=" + fileNode + ",filename=" + escapeComma(d.Path) + cacheOptions + aioOption
+		}
+		formatNode := "driver=" + format + ",node-name=" + d.BlockNode + ",file=" + fileNode + cacheOptions
+		if d.BackingPath != "" {
+			if format != "qcow2" {
+				return nil, fmt.Errorf("disk %s has a backing path with format %q", d.Name, format)
+			}
+			backingID := ID("back", d.Name)
+			backingFileNode, backingBlockNode := "file-"+backingID, "blk-"+backingID
+			args = append(args,
+				"-blockdev", "driver=file,node-name="+backingFileNode+",filename="+escapeComma(d.BackingPath)+",auto-read-only=on"+cacheOptions+aioOption,
+				"-blockdev", "driver=qcow2,node-name="+backingBlockNode+",file="+backingFileNode+",read-only=on"+cacheOptions)
+			formatNode += ",backing=" + backingBlockNode
 		}
 		args = append(args,
 			"-blockdev", protocol,
-			"-blockdev", "driver="+format+",node-name="+d.BlockNode+",file="+fileNode+cacheOptions)
+			"-blockdev", formatNode)
 		boot := ""
 		if diskBoot > 0 {
 			boot = fmt.Sprintf(",bootindex=%d", diskBoot+i)

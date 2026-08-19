@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -38,7 +39,7 @@ func TestBuildArgs(t *testing.T) {
 }
 
 func TestBuildUsesQCOW2ForFilesAndRawForLVM(t *testing.T) {
-	s := NodeSpec{Topology: "lab", Name: "vm", CPU: CPU{Model: "host", Sockets: 1, Cores: 1, Threads: 1}, Memory: Memory{MiB: 128}, Firmware: Firmware{Code: "c", Vars: "v"}, QMPPath: "q", PIDFile: "p", SerialSocket: "s", Disks: []DiskSpec{{Name: "file", Path: "/state/file.qcow2", Format: "qcow2", Cache: "none"}, {Name: "lv", Path: "/dev/vg/lv", Format: "raw", Cache: "writeback"}}}
+	s := NodeSpec{Topology: "lab", Name: "vm", CPU: CPU{Model: "host", Sockets: 1, Cores: 1, Threads: 1}, Memory: Memory{MiB: 128}, Firmware: Firmware{Code: "c", Vars: "v"}, QMPPath: "q", PIDFile: "p", SerialSocket: "s", Disks: []DiskSpec{{Name: "file", Path: "/state/file.qcow2", Format: "qcow2", Cache: "none", AIO: "io_uring"}, {Name: "lv", Path: "/dev/vg/lv", Format: "raw", Cache: "writeback", AIO: "threads"}}}
 	args, err := NewBuilder("").Build(s)
 	if err != nil {
 		t.Fatal(err)
@@ -72,12 +73,85 @@ func TestBuildUsesQCOW2ForFilesAndRawForLVM(t *testing.T) {
 			t.Errorf("writeback LVM node layer %d = %q", index, blockdevs[index])
 		}
 	}
+	if !strings.Contains(blockdevs[0], "aio=io_uring") || strings.Contains(blockdevs[1], "aio=") || !strings.Contains(blockdevs[2], "aio=threads") || strings.Contains(blockdevs[3], "aio=") {
+		t.Fatalf("AIO was not confined to protocol nodes: %v", blockdevs)
+	}
+}
+
+func TestBuildExplicitQCOW2BackingChainUsesSameAIOAndCache(t *testing.T) {
+	s := NodeSpec{Topology: "lab", Name: "vm", CPU: CPU{Model: "host", Sockets: 1, Cores: 1, Threads: 1}, Memory: Memory{MiB: 128}, Firmware: Firmware{Code: "c", Vars: "v"}, QMPPath: "q", PIDFile: "p", SerialSocket: "s", Disks: []DiskSpec{{Name: "root", Path: "/overlay.qcow2", Format: "qcow2", Cache: "none", AIO: "native", BackingPath: "/template.qcow2"}}}
+	args, err := NewBuilder("").Build(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var blockdevs []string
+	for i, arg := range args {
+		if arg == "-blockdev" {
+			blockdevs = append(blockdevs, args[i+1])
+		}
+	}
+	if len(blockdevs) != 4 {
+		t.Fatalf("blockdev arguments = %v", blockdevs)
+	}
+	if !strings.Contains(blockdevs[0], "filename=/template.qcow2") || !strings.Contains(blockdevs[0], "aio=native") || !strings.Contains(blockdevs[0], "cache.direct=on") {
+		t.Fatalf("backing protocol node = %q", blockdevs[0])
+	}
+	if !strings.Contains(blockdevs[1], "driver=qcow2") || !strings.Contains(blockdevs[1], "read-only=on") || strings.Contains(blockdevs[1], "aio=") {
+		t.Fatalf("backing format node = %q", blockdevs[1])
+	}
+	if !strings.Contains(blockdevs[2], "filename=/overlay.qcow2") || !strings.Contains(blockdevs[2], "aio=native") {
+		t.Fatalf("overlay protocol node = %q", blockdevs[2])
+	}
+	backingName := nextField(blockdevs[1], "node-name=")
+	if backingName == "" || !strings.Contains(blockdevs[3], "backing="+backingName) || strings.Contains(blockdevs[3], "aio=") {
+		t.Fatalf("overlay format node = %q, backing name %q", blockdevs[3], backingName)
+	}
+}
+
+func nextField(argument, prefix string) string {
+	for _, field := range strings.Split(argument, ",") {
+		if value, ok := strings.CutPrefix(field, prefix); ok {
+			return value
+		}
+	}
+	return ""
 }
 
 func TestBuildRejectsUnsupportedDiskCachePolicy(t *testing.T) {
 	s := NodeSpec{Topology: "lab", Name: "vm", CPU: CPU{Model: "host", Sockets: 1, Cores: 1, Threads: 1}, Memory: Memory{MiB: 128}, Firmware: Firmware{Code: "c", Vars: "v"}, QMPPath: "q", PIDFile: "p", SerialSocket: "s", Disks: []DiskSpec{{Name: "root", Path: "/root.qcow2", Cache: "unsafe"}}}
 	if _, err := NewBuilder("").Build(s); err == nil || !strings.Contains(err.Error(), `disk root has unsupported cache policy "unsafe"`) {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestBuildRejectsUnsupportedOrIncompatibleAIOPolicy(t *testing.T) {
+	base := NodeSpec{Topology: "lab", Name: "vm", CPU: CPU{Model: "host", Sockets: 1, Cores: 1, Threads: 1}, Memory: Memory{MiB: 128}, Firmware: Firmware{Code: "c", Vars: "v"}, QMPPath: "q", PIDFile: "p", SerialSocket: "s"}
+	for _, test := range []struct {
+		aio, cache, want string
+	}{{"auto", "none", `unsupported AIO policy "auto"`}, {"posix", "none", `unsupported AIO policy "posix"`}, {"native", "writeback", "native AIO without direct I/O"}} {
+		s := base
+		s.Disks = []DiskSpec{{Name: "root", Path: "/root.qcow2", AIO: test.aio, Cache: test.cache}}
+		if _, err := NewBuilder("").Build(s); err == nil || !strings.Contains(err.Error(), test.want) {
+			t.Errorf("aio=%s cache=%s: error = %v, want %q", test.aio, test.cache, err, test.want)
+		}
+	}
+}
+
+func TestProbeIOUringUsesQEMUBlockBackend(t *testing.T) {
+	dir := t.TempDir()
+	success := filepath.Join(dir, "success")
+	if err := os.WriteFile(success, []byte("#!/bin/sh\ncase \"$*\" in *aio=io_uring*) exit 0;; esac\nexit 9\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := ProbeIOUring(context.Background(), success); err != nil {
+		t.Fatal(err)
+	}
+	failure := filepath.Join(dir, "failure")
+	if err := os.WriteFile(failure, []byte("#!/bin/sh\necho io_uring unavailable >&2\nexit 7\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := ProbeIOUring(context.Background(), failure); err == nil || !strings.Contains(err.Error(), "io_uring unavailable") {
+		t.Fatalf("unexpected probe error: %v", err)
 	}
 }
 

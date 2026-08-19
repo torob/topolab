@@ -85,6 +85,7 @@ type App struct {
 	Executable      func() (string, error)
 	VhostAvailable  func() bool
 	GuestAgentProbe func(context.Context, string) bool
+	ProbeIOUring    func(context.Context, string) error
 	ZeroBlockDevice func(string, uint64) error
 	OVMFCode        string
 	OVMFVars        string
@@ -92,6 +93,7 @@ type App struct {
 	seedsDefault    bool
 	qemuDefault     bool
 	lvmDefault      bool
+	autoAIO         string
 }
 
 func New(stdout, stderr io.Writer) *App {
@@ -162,6 +164,9 @@ func (a *App) defaults() {
 	}
 	if a.GuestAgentProbe == nil {
 		a.GuestAgentProbe = qemu.GuestAgentAvailable
+	}
+	if a.ProbeIOUring == nil {
+		a.ProbeIOUring = qemu.ProbeIOUring
 	}
 	if a.ZeroBlockDevice == nil {
 		a.ZeroBlockDevice = zeroBlockDevice
@@ -241,7 +246,7 @@ func (a *App) Run(ctx context.Context, command Command) error {
 			}
 		}
 		if command.Name == "up" || command.Name == "start" || command.Name == "restart" {
-			if err := a.runtimePreflight(command.Topology, command.Helpers); err != nil {
+			if err := a.runtimePreflight(ctx, command.Topology, command.Helpers); err != nil {
 				return err
 			}
 		}
@@ -299,7 +304,7 @@ func requiresLegacyDatapathDown(m *state.Manifest) bool {
 	return m != nil && m.DatapathVersion > 0 && m.DatapathVersion < network.DatapathVersion
 }
 
-func (a *App) runtimePreflight(cfg *config.Config, overrides HelperOverrides) error {
+func (a *App) runtimePreflight(ctx context.Context, cfg *config.Config, overrides HelperOverrides) error {
 	needsDNS := false
 	cpuModels := map[string]bool{}
 	deviceModels := map[string]bool{"ide-cd": len(cfg.VMs) > 0}
@@ -377,7 +382,48 @@ func (a *App) runtimePreflight(cfg *config.Config, overrides HelperOverrides) er
 		}
 		a.OVMFCode, a.OVMFVars = paths.OVMFCode, paths.OVMFVars
 	}
-	return a.Preflight(preflight.Options{NeedsDNSMasq: needsDNS, RequireVM: len(cfg.VMs) > 0, Helpers: paths, HelpersResolved: len(cfg.VMs) > 0, CPUModels: cpus, DeviceModels: devices, CPUPlans: plans})
+	if err := a.Preflight(preflight.Options{NeedsDNSMasq: needsDNS, RequireVM: len(cfg.VMs) > 0, Helpers: paths, HelpersResolved: len(cfg.VMs) > 0, CPUModels: cpus, DeviceModels: devices, CPUPlans: plans}); err != nil {
+		return err
+	}
+	needsAuto, needsExplicitIOUring := false, false
+	for _, vm := range cfg.VMs {
+		for _, aio := range append([]string{vm.RootDisk.AIO}, diskAIOs(vm.AdditionalDisks)...) {
+			switch aio {
+			case "", "auto":
+				needsAuto = true
+			case "io_uring":
+				needsExplicitIOUring = true
+			}
+		}
+	}
+	a.autoAIO = "threads"
+	if !needsAuto && !needsExplicitIOUring {
+		return nil
+	}
+	probeExecutable := paths.QEMUSystem
+	if a.QEMUBuilder != nil && a.QEMUBuilder.Executable != "" {
+		probeExecutable = a.QEMUBuilder.Executable
+	}
+	if err := a.ProbeIOUring(ctx, probeExecutable); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if needsExplicitIOUring {
+			return fmt.Errorf("io_uring AIO was explicitly requested but is unavailable: %w", err)
+		}
+		fmt.Fprintf(a.Stderr, "warning: io_uring AIO is unavailable; aio auto is using threads: %v\n", err)
+		return nil
+	}
+	a.autoAIO = "io_uring"
+	return nil
+}
+
+func diskAIOs(disks []*config.Disk) []string {
+	values := make([]string, 0, len(disks))
+	for _, disk := range disks {
+		values = append(values, disk.AIO)
+	}
+	return values
 }
 
 func (a *App) configureLVM(cfg *config.Config, manifest *state.Manifest, overrides HelperOverrides) error {

@@ -234,6 +234,9 @@ func validateVM(c *Config, name string, vm *VM, macs map[string]string, ips map[
 	if err := validDiskCache(vm.RootDisk.Cache); err != nil {
 		return fmt.Errorf("VM %q root_disk: %w", name, err)
 	}
+	if err := validDiskAIO(vm.RootDisk.AIO, vm.RootDisk.Cache); err != nil {
+		return fmt.Errorf("VM %q root_disk: %w", name, err)
+	}
 	if vm.RootDisk.Storage == "" {
 		return fmt.Errorf("VM %q root_disk.storage is required", name)
 	}
@@ -261,6 +264,9 @@ func validateVM(c *Config, name string, vm *VM, macs map[string]string, ips map[
 			return fmt.Errorf("VM %q disk %q: %w", name, diskName, err)
 		}
 		if err := validDiskCache(d.Cache); err != nil {
+			return fmt.Errorf("VM %q disk %q: %w", name, diskName, err)
+		}
+		if err := validDiskAIO(d.AIO, d.Cache); err != nil {
 			return fmt.Errorf("VM %q disk %q: %w", name, diskName, err)
 		}
 	}
@@ -337,6 +343,16 @@ func validateVM(c *Config, name string, vm *VM, macs map[string]string, ips map[
 func validDiskCache(cache string) error {
 	if cache != "none" && cache != "writeback" {
 		return fmt.Errorf("cache must be none or writeback, got %q", cache)
+	}
+	return nil
+}
+
+func validDiskAIO(aio, cache string) error {
+	if aio != "auto" && aio != "io_uring" && aio != "threads" && aio != "native" {
+		return fmt.Errorf("aio must be auto, io_uring, threads, or native, got %q", aio)
+	}
+	if aio == "native" && cache != "none" {
+		return errors.New("aio native requires cache none")
 	}
 	return nil
 }

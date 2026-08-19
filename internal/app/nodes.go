@@ -151,21 +151,21 @@ func vmRestartSnapshot(cfg *config.Config, name string, vm *config.VM) any {
 		Name, Model string
 		Queues      int
 	}
-	type disk struct{ Name, Bus, Cache string }
+	type disk struct{ Name, Bus, Cache, AIO string }
 	r := struct {
-		CPU                 *config.CPU
-		Memory              int
-		Balloon, GuestAgent bool
-		RootBus, RootCache  string
-		Boot                config.Boot
-		NICs                []nic
-		Disks               []disk
-	}{vm.CPU, vm.MemoryMB, vm.MemoryBalloon.Enabled, vm.GuestAgent, vm.RootDisk.Bus, vm.RootDisk.Cache, vm.Boot, nil, nil}
+		CPU                         *config.CPU
+		Memory                      int
+		Balloon, GuestAgent         bool
+		RootBus, RootCache, RootAIO string
+		Boot                        config.Boot
+		NICs                        []nic
+		Disks                       []disk
+	}{vm.CPU, vm.MemoryMB, vm.MemoryBalloon.Enabled, vm.GuestAgent, vm.RootDisk.Bus, vm.RootDisk.Cache, vm.RootDisk.AIO, vm.Boot, nil, nil}
 	for _, i := range vm.Interfaces {
 		r.NICs = append(r.NICs, nic{i.Name, i.Model, i.Queues})
 	}
 	for _, d := range vm.AdditionalDisks {
-		r.Disks = append(r.Disks, disk{d.Name, d.Bus, d.Cache})
+		r.Disks = append(r.Disks, disk{d.Name, d.Bus, d.Cache, d.AIO})
 	}
 	return r
 }
@@ -602,13 +602,27 @@ func (a *App) qemuSpec(cfg *config.Config, name string, n *state.Node, netState 
 		}
 		s.NICs = append(s.NICs, qemu.NICSpec{Name: in, Model: v.Model, MAC: v.MAC, TAP: tap.Name, Queues: v.Queues})
 	}
-	s.Disks = append(s.Disks, qemu.DiskSpec{Name: "root", Path: n.RootDisk.Path, Bus: n.RootDisk.Bus, BlockNode: n.RootDisk.BlockNode, Serial: n.RootDisk.Serial, Format: n.RootDisk.Format, Cache: vm.RootDisk.Cache, Boot: true})
+	root := qemu.DiskSpec{Name: "root", Path: n.RootDisk.Path, Bus: n.RootDisk.Bus, BlockNode: n.RootDisk.BlockNode, Serial: n.RootDisk.Serial, Format: n.RootDisk.Format, Cache: vm.RootDisk.Cache, AIO: a.effectiveAIO(vm.RootDisk.AIO), Boot: true}
+	if n.RootDisk.Format == "qcow2" && n.RootDisk.Provisioning == "snapshot" {
+		root.BackingPath = n.TemplatePath
+	}
+	s.Disks = append(s.Disks, root)
 	for _, d := range n.AdditionalDisks {
 		configured, ok := cfg.LookupVMAdditionalDisk(name, d.Name)
 		if !ok {
 			return s, fmt.Errorf("node %s has undeclared disk %s", name, d.Name)
 		}
-		s.Disks = append(s.Disks, qemu.DiskSpec{Name: d.Name, Path: d.Path, Bus: d.Bus, BlockNode: d.BlockNode, Serial: d.Serial, Format: d.Format, Cache: configured.Cache})
+		s.Disks = append(s.Disks, qemu.DiskSpec{Name: d.Name, Path: d.Path, Bus: d.Bus, BlockNode: d.BlockNode, Serial: d.Serial, Format: d.Format, Cache: configured.Cache, AIO: a.effectiveAIO(configured.AIO)})
 	}
 	return s, nil
+}
+
+func (a *App) effectiveAIO(policy string) string {
+	if policy != "" && policy != "auto" {
+		return policy
+	}
+	if a.autoAIO != "" {
+		return a.autoAIO
+	}
+	return "threads"
 }

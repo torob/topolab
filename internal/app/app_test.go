@@ -396,7 +396,7 @@ func TestRootCapacityBelowTemplateFailsBeforeMaterialization(t *testing.T) {
 	}
 }
 
-func TestDiskCacheChangesOnlyAffectedVMRestartIdentity(t *testing.T) {
+func TestDiskIOPolicyChangesOnlyAffectedVMRestartIdentity(t *testing.T) {
 	base, err := os.MkdirTemp("/tmp", "tlcache-")
 	if err != nil {
 		t.Fatal(err)
@@ -410,8 +410,8 @@ func TestDiskCacheChangesOnlyAffectedVMRestartIdentity(t *testing.T) {
 	vm := func(name string) *config.VM {
 		return &config.VM{
 			Name: name, Template: "base", MemoryBalloon: &config.MemoryBalloon{},
-			RootDisk:        config.RootDisk{Storage: "local", Bus: "scsi", Cache: "none"},
-			AdditionalDisks: []*config.Disk{{Name: "data", SizeGiB: 1, Storage: "local", Bus: "scsi", Cache: "none"}},
+			RootDisk:        config.RootDisk{Storage: "local", Bus: "scsi", Cache: "none", AIO: "auto"},
+			AdditionalDisks: []*config.Disk{{Name: "data", SizeGiB: 1, Storage: "local", Bus: "scsi", Cache: "none", AIO: "auto"}},
 		}
 	}
 	cfg := &config.Config{Name: "lab", Storages: []*config.Storage{storage}, VMs: []*config.VM{vm("vm1"), vm("vm2")}}
@@ -441,6 +441,25 @@ func TestDiskCacheChangesOnlyAffectedVMRestartIdentity(t *testing.T) {
 	}
 	if afterRoot["vm1"].StorageIdentityHash != afterAdditional["vm1"].StorageIdentityHash || afterRoot["vm1"].AdditionalDisks[0].Path != afterAdditional["vm1"].AdditionalDisks[0].Path {
 		t.Fatal("additional cache change altered storage identity")
+	}
+	cfg.VMs[0].RootDisk.AIO = "threads"
+	afterRootAIO, err := New(nil, nil).desiredNodes(cfg, layout, templates)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterAdditional["vm1"].RestartHash == afterRootAIO["vm1"].RestartHash || afterAdditional["vm2"].RestartHash != afterRootAIO["vm2"].RestartHash {
+		t.Fatalf("root AIO change affected wrong restart hashes: before=%#v after=%#v", afterAdditional, afterRootAIO)
+	}
+	cfg.VMs[0].AdditionalDisks[0].AIO = "io_uring"
+	afterAdditionalAIO, err := New(nil, nil).desiredNodes(cfg, layout, templates)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterRootAIO["vm1"].RestartHash == afterAdditionalAIO["vm1"].RestartHash || afterRootAIO["vm2"].RestartHash != afterAdditionalAIO["vm2"].RestartHash {
+		t.Fatalf("additional AIO change affected wrong restart hashes: before=%#v after=%#v", afterRootAIO, afterAdditionalAIO)
+	}
+	if afterRootAIO["vm1"].StorageIdentityHash != afterAdditionalAIO["vm1"].StorageIdentityHash || afterRootAIO["vm1"].RootDisk.Path != afterAdditionalAIO["vm1"].RootDisk.Path || afterRootAIO["vm1"].AdditionalDisks[0].Path != afterAdditionalAIO["vm1"].AdditionalDisks[0].Path {
+		t.Fatal("AIO changes altered storage identity")
 	}
 }
 
@@ -613,7 +632,9 @@ func TestVMHelperOverridesReachPreflightAndRuntimeConsumers(t *testing.T) {
 	a.defaults()
 	var got preflight.Options
 	a.Preflight = func(options preflight.Options) error { got = options; return nil }
-	if err := a.runtimePreflight(testVMConfig(), overrides); err != nil {
+	var probed string
+	a.ProbeIOUring = func(_ context.Context, executable string) error { probed = executable; return nil }
+	if err := a.runtimePreflight(context.Background(), testVMConfig(), overrides); err != nil {
 		t.Fatal(err)
 	}
 	if got.Helpers.QEMUSystem != overrides.QEMUSystem || got.Helpers.QEMUImg != overrides.QEMUImg || got.Helpers.Xorriso != overrides.Xorriso || got.Helpers.OVMFCode != overrides.OVMFCode || got.Helpers.OVMFVars != overrides.OVMFVars {
@@ -629,6 +650,91 @@ func TestVMHelperOverridesReachPreflightAndRuntimeConsumers(t *testing.T) {
 	}
 	if a.QEMUBuilder.Executable != overrides.QEMUSystem || a.OVMFCode != overrides.OVMFCode || a.OVMFVars != overrides.OVMFVars {
 		t.Fatalf("QEMU runtime helpers = %#v %q %q", a.QEMUBuilder, a.OVMFCode, a.OVMFVars)
+	}
+	if probed != overrides.QEMUSystem || a.autoAIO != "io_uring" {
+		t.Fatalf("io_uring probe executable/effective AIO = %q/%q", probed, a.autoAIO)
+	}
+}
+
+func TestAIOPreflightAutoFallbackAndExplicitSelection(t *testing.T) {
+	overrides := testHelperOverrides(t)
+	newApp := func(stderr *bytes.Buffer, probe func(context.Context, string) error) *App {
+		a := New(nil, stderr)
+		a.defaults()
+		a.Preflight = func(preflight.Options) error { return nil }
+		a.ProbeIOUring = probe
+		return a
+	}
+	t.Run("auto fallback", func(t *testing.T) {
+		var stderr bytes.Buffer
+		calls := 0
+		a := newApp(&stderr, func(context.Context, string) error { calls++; return errors.New("operation not supported") })
+		if err := a.runtimePreflight(context.Background(), testVMConfig(), overrides); err != nil {
+			t.Fatal(err)
+		}
+		if calls != 1 || a.autoAIO != "threads" || strings.Count(stderr.String(), "aio auto is using threads") != 1 {
+			t.Fatalf("calls=%d effective=%q stderr=%q", calls, a.autoAIO, stderr.String())
+		}
+	})
+	t.Run("explicit io_uring is strict", func(t *testing.T) {
+		cfg := testVMConfig()
+		cfg.VMs[0].RootDisk.AIO = "io_uring"
+		a := newApp(&bytes.Buffer{}, func(context.Context, string) error { return errors.New("operation not supported") })
+		if err := a.runtimePreflight(context.Background(), cfg, overrides); err == nil || !strings.Contains(err.Error(), "explicitly requested") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+	t.Run("threads and native skip probe", func(t *testing.T) {
+		cfg := testVMConfig()
+		cfg.VMs[0].RootDisk.AIO = "threads"
+		cfg.VMs[0].AdditionalDisks = []*config.Disk{{Name: "data", AIO: "native"}}
+		a := newApp(&bytes.Buffer{}, func(context.Context, string) error { t.Fatal("unexpected io_uring probe"); return nil })
+		if err := a.runtimePreflight(context.Background(), cfg, overrides); err != nil {
+			t.Fatal(err)
+		}
+		if a.autoAIO != "threads" {
+			t.Fatalf("unused auto AIO = %q", a.autoAIO)
+		}
+	})
+}
+
+func TestExplicitIOUringProbeFailurePrecedesStateMutation(t *testing.T) {
+	overrides := testHelperOverrides(t)
+	parent, err := os.MkdirTemp("/tmp", "tlaio-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(parent) })
+	working := filepath.Join(parent, "not-created")
+	cfg := testVMConfig()
+	cfg.VMs[0].RootDisk.AIO = "io_uring"
+	a := New(nil, nil)
+	a.Preflight = func(preflight.Options) error { return nil }
+	a.ProbeIOUring = func(context.Context, string) error { return errors.New("operation not supported") }
+	if runErr := a.Run(context.Background(), Command{Name: "up", Topology: cfg, WorkingDir: working, Helpers: overrides}); runErr == nil || !strings.Contains(runErr.Error(), "explicitly requested") {
+		t.Fatalf("preflight error = %v", runErr)
+	}
+	if _, err := os.Stat(working); !os.IsNotExist(err) {
+		t.Fatalf("failed AIO preflight created state: %v", err)
+	}
+}
+
+func TestQEMUSpecResolvesAIOAndExplicitSnapshotBacking(t *testing.T) {
+	one := 1
+	cfg := &config.Config{Name: "lab", VMs: []*config.VM{{
+		Name: "vm", CPU: &config.CPU{Model: "host", Sockets: &one, Cores: &one, Threads: &one}, MemoryBalloon: &config.MemoryBalloon{},
+		RootDisk:        config.RootDisk{Cache: "none", AIO: "auto"},
+		AdditionalDisks: []*config.Disk{{Name: "data", Cache: "none", AIO: "native"}},
+	}}}
+	n := &state.Node{TemplatePath: "/template.qcow2", RootDisk: &state.Disk{Name: "root", Path: "/root.qcow2", Format: "qcow2", Provisioning: "snapshot"}, AdditionalDisks: []state.Disk{{Name: "data", Path: "/dev/vg/data", Format: "raw"}}}
+	a := New(nil, nil)
+	a.autoAIO = "io_uring"
+	spec, err := a.qemuSpec(cfg, "vm", n, &network.State{TAPs: map[string]network.TAPState{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(spec.Disks) != 2 || spec.Disks[0].AIO != "io_uring" || spec.Disks[0].BackingPath != "/template.qcow2" || spec.Disks[1].AIO != "native" || spec.Disks[1].BackingPath != "" {
+		t.Fatalf("QEMU disks = %#v", spec.Disks)
 	}
 }
 

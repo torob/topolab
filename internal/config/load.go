@@ -216,7 +216,7 @@ func validateSocketPaths(wd string, cfg *Config) error {
 
 func validateExplicitDefaults(doc *yaml.Node) error {
 	zeroInvalid := map[string]bool{"mtu": true, "memory_mb": true, "queues": true, "sockets": true, "cores": true, "threads": true}
-	emptyInvalid := map[string]bool{"model": true, "bus": true, "cache": true, "mode": true, "egress_interface": true, "source_ip": true, "lease": true}
+	emptyInvalid := map[string]bool{"model": true, "bus": true, "cache": true, "aio": true, "mode": true, "egress_interface": true, "source_ip": true, "lease": true}
 	var walk func(*yaml.Node) error
 	walk = func(n *yaml.Node) error {
 		if n == nil {
@@ -235,8 +235,8 @@ func validateExplicitDefaults(doc *yaml.Node) error {
 		}
 		for i := 0; i < len(n.Content); i += 2 {
 			key, value := n.Content[i].Value, n.Content[i+1]
-			if key == "cache" && value.Kind == yaml.ScalarNode && value.Tag == "!!null" {
-				return fmt.Errorf("line %d: cache may not be empty", value.Line)
+			if (key == "cache" || key == "aio") && value.Kind == yaml.ScalarNode && value.Tag == "!!null" {
+				return fmt.Errorf("line %d: %s may not be empty", value.Line, key)
 			}
 			if zeroInvalid[key] && value.Kind == yaml.ScalarNode && (value.Value == "0" || value.Value == "+0" || value.Value == "-0") {
 				return fmt.Errorf("line %d: %s must be positive or omitted", value.Line, key)

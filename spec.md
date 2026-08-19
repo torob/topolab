@@ -421,12 +421,14 @@ vms:
       bus: scsi
       storage: thin
       cache: none
+      aio: auto
     additional_disks:
       - name: data
         size_gib: 100
         bus: scsi
         storage: thick
         cache: writeback
+        aio: threads
     guest_agent: true
     boot:
       order: [disk, network]
@@ -665,6 +667,17 @@ performance and requires support from the underlying filesystem or block
 device. An unsupported direct-I/O backend must make VM startup fail clearly;
 the tool must not silently fall back to buffered I/O.
 
+`root_disk.aio` and each additional disk's `aio` select the QEMU asynchronous
+I/O backend. The value defaults to `auto` and must be `auto`, `io_uring`,
+`threads`, or `native`; an explicitly empty value is invalid. Before any
+reconciliation, `auto` probes the resolved QEMU executable and running kernel,
+uses `io_uring` when the probe succeeds, and otherwise emits one warning for
+the command and uses `threads`. Explicit `io_uring` is strict and a failed
+probe is a preflight error. Explicit `threads` and `native` are passed through;
+`native` is invalid with `cache: writeback` because native AIO requires direct
+I/O. Backend-specific filesystem or device incompatibility fails VM startup
+instead of causing another fallback.
+
 Disk declaration order is significant. The root disk is always created and
 attached first, before every additional disk, and receives the VM's first disk
 boot priority. Additional disks are created and attached in their YAML source
@@ -714,6 +727,12 @@ restart hash and restarts it without changing storage identity or recreating
 any disk. Configurations written before this setting existed intentionally
 adopt the `none` default on their next `up`; operators who require the prior
 buffered behavior must add `cache: writeback` to each affected disk.
+Changing a root or additional disk's configured `aio` policy has the same
+restart-only and disk-preserving behavior. The configured policy, including
+`auto`, is part of the restart hash; the host-resolved backend is not. A host
+capability change therefore takes effect on the next normal VM launch without
+changing disk identity.
+Configurations written before `aio` existed adopt `auto` on their next `up`.
 
 All configured disks support increase-only resizing. Before applying any
 change, the tool must read the actual virtual capacity of the root disk and
@@ -1205,10 +1224,16 @@ resize` on an image currently opened by QEMU.
 For each writable disk, QEMU's protocol node (`file` or `host_device`) and
 format node (`qcow2` or `raw`) receive the normalized cache policy. `none` maps
 to `cache.direct=on,cache.no-flush=off`; `writeback` maps to
-`cache.direct=off,cache.no-flush=off`. Applying the policy to the format node
-also makes automatically opened qcow2 backing chains inherit it. This guarantee
-covers VM root and additional disk data only; firmware, seed media, metadata,
-guest RAM, and unrelated host I/O are outside its scope.
+`cache.direct=off,cache.no-flush=off`. Explicit qcow2 backing-chain protocol
+and format nodes receive the same policy. This guarantee covers VM root and
+additional disk data only; firmware, seed media, metadata, guest RAM, and
+unrelated host I/O are outside its scope.
+The effective AIO backend is applied only to protocol nodes, where QEMU accepts
+the `aio` option. File-backed qcow2 snapshot roots use explicit deterministic,
+read-only backing format/protocol nodes rather than automatic backing-file
+opening, so their template protocol nodes receive the same cache and AIO
+settings as the writable overlay. Standalone file disks and raw LVM disks have
+no backing nodes.
 
 The generated NoCloud seed contains `meta-data`, `user-data`, and
 `network-config`. For a VM, the seed contains only its hostname, locked-

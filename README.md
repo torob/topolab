@@ -127,7 +127,7 @@ vms:
     template: ubuntu
     root_disk: {storage: thin, size_gib: 8}
     additional_disks:
-      - {name: data, storage: thick, size_gib: 4, cache: writeback}
+      - {name: data, storage: thick, size_gib: 4, cache: writeback, aio: threads}
 ```
 
 `root_provisioning` is required and is `copy` or `snapshot` for `file` and
@@ -148,6 +148,16 @@ disk's cache policy restarts only its VM and preserves the disk. On upgrade,
 existing configurations without `cache` intentionally switch to direct I/O on
 their next `up`; add `cache: writeback` to disks that should keep the previous
 buffered behavior.
+
+Every disk also defaults to `aio: auto`. TopoLab probes the selected QEMU and
+running kernel before reconciliation, uses `io_uring` when available, and
+otherwise warns once and falls back to `threads`. Set `aio: io_uring`,
+`aio: threads`, or `aio: native` for a strict per-disk choice; an explicitly
+requested unavailable `io_uring` backend fails preflight. Native AIO requires
+`cache: none`. For qcow2 snapshot roots, the selected cache and AIO policies
+apply to both the writable overlay and its read-only template backing chain.
+Changing `aio` restarts only the affected VM and preserves its disks.
+Existing configurations without `aio` adopt `auto` on their next `up`.
 
 LVM zeroing is opt-in. `zero_new_blocks: true` is valid only for `lvm-thin`
 and makes LVM clear newly allocated pool chunks; the setting is fixed when the

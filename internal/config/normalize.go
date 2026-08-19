@@ -70,6 +70,9 @@ func normalize(c *Config, baseDir string) error {
 		if vm.RootDisk.Cache == "" {
 			vm.RootDisk.Cache = "none"
 		}
+		if vm.RootDisk.AIO == "" {
+			vm.RootDisk.AIO = "auto"
+		}
 		if vm.AdditionalDisks == nil {
 			vm.AdditionalDisks = []*Disk{}
 		}
@@ -79,6 +82,9 @@ func normalize(c *Config, baseDir string) error {
 			}
 			if disk.Cache == "" {
 				disk.Cache = "none"
+			}
+			if disk.AIO == "" {
+				disk.AIO = "auto"
 			}
 		}
 		if len(vm.Boot.Order) == 0 {

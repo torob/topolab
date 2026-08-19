@@ -290,7 +290,8 @@ def vm_block(number: int, storage: str, address: str) -> str:
     key = "${TOPOLAB_SSH_PUBLIC_KEY:?set by harness}"
     data_storage = "thick-wipe" if number == 1 else "thick" if number % 3 == 1 else "thin-copy" if number % 3 == 2 else "file-copy"
     cache = ", cache: writeback" if number == 1 else ""
-    disks = [f"      - {{name: data-{number}, size_gib: 1, storage: {data_storage}{cache}}}"]
+    aio = ", aio: threads" if number == 1 else ", aio: native" if number == 4 else ""
+    disks = [f"      - {{name: data-{number}, size_gib: 1, storage: {data_storage}{cache}{aio}}}"]
     if number == 2:
         disks.append("      - {name: pressure, size_gib: 6, storage: thin-copy}")
     return f"""  - name: vm{number}
@@ -349,7 +350,7 @@ def write_zero_extent(path: str, offset: int, length: int) -> None:
         os.close(descriptor)
 
 
-def assert_storage_layout(harness: Harness, fixture: Fixture) -> None:
+def assert_storage_layout(harness: Harness, fixture: Fixture, auto_aio: str) -> None:
     manifest = harness.manifest()
     require(manifest["version"] == 3 and len(manifest["storages"]) == 6, "manifest lacks explicit storage identities")
     values = inventory(fixture)
@@ -403,8 +404,11 @@ def assert_storage_layout(harness: Harness, fixture: Fixture) -> None:
             protocol_node = "file-" + block_node.removeprefix("blk-")
             direct = not (number == 1 and disk["name"] == "data-1")
             direct_arg = "on" if direct else "off"
+            aio = "threads" if number == 1 and disk["name"] == "data-1" else "native" if number == 4 and disk["name"] == "data-4" else auto_aio
             require(block_node in blockdev_by_name and blockdev_by_name[block_node].startswith(f"driver={disk['format']},"), f"QEMU format mismatch for vm{number}/{disk['name']}")
             require(protocol_node in blockdev_by_name and blockdev_by_name[protocol_node].startswith(f"driver={protocol},"), f"QEMU protocol mismatch for vm{number}/{disk['name']}")
+            require(f"aio={aio}" in blockdev_by_name[protocol_node], f"QEMU AIO mismatch for vm{number}/{disk['name']}: {blockdev_by_name[protocol_node]}")
+            require("aio=" not in blockdev_by_name[block_node], f"QEMU format node unexpectedly contains AIO for vm{number}/{disk['name']}: {blockdev_by_name[block_node]}")
             for layer in (block_node, protocol_node):
                 argument = blockdev_by_name[layer]
                 require(f"cache.direct={direct_arg}" in argument and "cache.no-flush=off" in argument, f"QEMU argv cache mismatch for vm{number}/{disk['name']} layer {layer}: {argument}")
@@ -412,6 +416,12 @@ def assert_storage_layout(harness: Harness, fixture: Fixture) -> None:
                 require(cache["direct"] is direct and cache["no-flush"] is False, f"QMP cache mismatch for vm{number}/{disk['name']} layer {layer}: {cache}")
         if number == 1:
             template = Path(node["template_path"]).resolve()
+            backing_protocols = [
+                argument for argument in blockdevs
+                if argument.startswith("driver=file,")
+                and f"filename={template}" in argument
+            ]
+            require(len(backing_protocols) == 1 and f"aio={auto_aio}" in backing_protocols[0], f"qcow2 backing protocol has wrong AIO: {backing_protocols}")
             backing_nodes = [
                 item for item in named_nodes.values()
                 if item.get("drv") == "qcow2"
@@ -448,9 +458,10 @@ def main() -> None:
         shutil.copyfile(harness.topology, cleanup_topology)
         fixture.state["cleanup_topology"] = str(cleanup_topology)
         fixture.save()
-        harness.run("up", timeout=900)
+        initial_up = harness.run("up", timeout=900)
+        auto_aio = "threads" if "aio auto is using threads" in initial_up.stderr else "io_uring"
         fixture.register_inventory()
-        assert_storage_layout(harness, fixture)
+        assert_storage_layout(harness, fixture, auto_aio)
         for number in range(1, 7):
             harness.wait_ssh(f"10.77.0.{10 + number}", timeout=420)
             harness.ssh(f"10.77.0.{10 + number}", "sudo", "sh", "-c", f"echo marker-{number} >/var/tmp/topolab-storage-marker")
@@ -529,7 +540,7 @@ def main() -> None:
         harness.replace_topology("pool_size_gib: 9, root_provisioning: snapshot", "pool_size_gib: 9, root_provisioning: copy", count=1)
 
         # Kill TopoLab immediately after one targeted LVM creation; the next up recovers the checkpoint.
-        harness.replace_topology("      - {name: data-1, size_gib: 1, storage: thick-wipe, cache: writeback}", "      - {name: data-1, size_gib: 1, storage: thick-wipe, cache: writeback}\n      - {name: interrupted, size_gib: 1, storage: thick-wipe}")
+        harness.replace_topology("      - {name: data-1, size_gib: 1, storage: thick-wipe, cache: writeback, aio: threads}", "      - {name: data-1, size_gib: 1, storage: thick-wipe, cache: writeback, aio: threads}\n      - {name: interrupted, size_gib: 1, storage: thick-wipe}")
         wrapper = fixture.root / "lvm-kill-wrapper"
         real_lvm = shutil.which("lvm")
         require(real_lvm is not None, "lvm disappeared")

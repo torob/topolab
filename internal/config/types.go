@@ -152,6 +152,7 @@ type RootDisk struct {
 	Bus     string  `yaml:"bus"`
 	Storage string  `yaml:"storage"`
 	Cache   string  `yaml:"cache"`
+	AIO     string  `yaml:"aio"`
 }
 
 type Disk struct {
@@ -160,6 +161,7 @@ type Disk struct {
 	Bus     string `yaml:"bus"`
 	Storage string `yaml:"storage"`
 	Cache   string `yaml:"cache"`
+	AIO     string `yaml:"aio"`
 }
 
 type Boot struct {
