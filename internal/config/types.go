@@ -29,17 +29,21 @@ type Storage struct {
 	VolumeGroup      string `yaml:"volume_group,omitempty"`
 	PoolSizeGiB      uint64 `yaml:"pool_size_gib,omitempty"`
 	RootProvisioning string `yaml:"root_provisioning,omitempty"`
+	ZeroNewBlocks    bool   `yaml:"zero_new_blocks,omitempty"`
+	WipeOnCreate     bool   `yaml:"wipe_on_create,omitempty"`
 
 	volumeGroupSet      bool
 	poolSizeGiBSet      bool
 	rootProvisioningSet bool
+	zeroNewBlocksSet    bool
+	wipeOnCreateSet     bool
 }
 
 func (s *Storage) UnmarshalYAML(node *yaml.Node) error {
 	if node.Kind != yaml.MappingNode {
 		return fmt.Errorf("storage must be a mapping")
 	}
-	allowed := map[string]bool{"name": true, "type": true, "volume_group": true, "pool_size_gib": true, "root_provisioning": true}
+	allowed := map[string]bool{"name": true, "type": true, "volume_group": true, "pool_size_gib": true, "root_provisioning": true, "zero_new_blocks": true, "wipe_on_create": true}
 	seen := map[string]bool{}
 	for i := 0; i < len(node.Content); i += 2 {
 		key := node.Content[i].Value
@@ -72,6 +76,16 @@ func (s *Storage) UnmarshalYAML(node *yaml.Node) error {
 		case "root_provisioning":
 			s.rootProvisioningSet = true
 			if err := node.Content[i+1].Decode(&s.RootProvisioning); err != nil {
+				return err
+			}
+		case "zero_new_blocks":
+			s.zeroNewBlocksSet = true
+			if err := node.Content[i+1].Decode(&s.ZeroNewBlocks); err != nil {
+				return err
+			}
+		case "wipe_on_create":
+			s.wipeOnCreateSet = true
+			if err := node.Content[i+1].Decode(&s.WipeOnCreate); err != nil {
 				return err
 			}
 		}

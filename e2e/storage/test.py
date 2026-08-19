@@ -262,7 +262,8 @@ class Fixture:
 
 def vm_block(number: int, storage: str, address: str) -> str:
     key = "${TOPOLAB_SSH_PUBLIC_KEY:?set by harness}"
-    disks = [f"      - {{name: data-{number}, size_gib: 1, storage: {('thick' if number % 3 == 1 else 'thin-copy' if number % 3 == 2 else 'file-copy')}}}"]
+    data_storage = "thick-wipe" if number == 1 else "thick" if number % 3 == 1 else "thin-copy" if number % 3 == 2 else "file-copy"
+    disks = [f"      - {{name: data-{number}, size_gib: 1, storage: {data_storage}}}"]
     if number == 2:
         disks.append("      - {name: pressure, size_gib: 6, storage: thin-copy}")
     return f"""  - name: vm{number}
@@ -290,8 +291,9 @@ storages:
   - {{name: file-snapshot, type: file, root_provisioning: snapshot}}
   - {{name: file-copy, type: file, root_provisioning: copy}}
   - {{name: thin-copy, type: lvm-thin, volume_group: {vg}, pool_size_gib: 8, root_provisioning: copy}}
-  - {{name: thin-snapshot, type: lvm-thin, volume_group: {vg}, pool_size_gib: 6, root_provisioning: snapshot}}
+  - {{name: thin-snapshot, type: lvm-thin, volume_group: {vg}, pool_size_gib: 6, root_provisioning: snapshot, zero_new_blocks: true}}
   - {{name: thick, type: lvm-thick, volume_group: {vg}}}
+  - {{name: thick-wipe, type: lvm-thick, volume_group: {vg}, wipe_on_create: true}}
 management_host:
   interfaces:
     - name: lan
@@ -322,7 +324,7 @@ def write_zero_extent(path: str, offset: int, length: int) -> None:
 
 def assert_storage_layout(harness: Harness, fixture: Fixture) -> None:
     manifest = harness.manifest()
-    require(manifest["version"] == 2 and len(manifest["storages"]) == 5, "manifest lacks explicit storage identities")
+    require(manifest["version"] == 3 and len(manifest["storages"]) == 6, "manifest lacks explicit storage identities")
     values = inventory(fixture)
     rows = {row["lv_name"].strip(): row for row in fixture.lvs()}
     pools = [value for value in manifest["storages"].values() if value["type"] == "lvm-thin"]
@@ -330,6 +332,8 @@ def assert_storage_layout(harness: Harness, fixture: Fixture) -> None:
     for storage in pools:
         row = rows[storage["pool_name"]]
         require(row["lv_uuid"].strip() == storage["pool_uuid"] and row["vg_uuid"].strip() == storage["vg_uuid"] == fixture.state["vg_uuid"], "pool manifest identity differs from LVM")
+        attr = row.get("lv_attr", "")
+        require(len(attr) > 7 and (attr[7] == "z") == storage.get("zero_new_blocks", False), "thin pool zero mode differs from manifest")
     roots = [manifest["nodes"][f"vm{i}"]["root_disk"] for i in range(1, 7)]
     require(roots[2]["lv_uuid"] != roots[3]["lv_uuid"] and not values[roots[2]["lv_name"]][2] and not values[roots[3]["lv_name"]][2], "thin-copy roots are not independent")
     origins = {values[roots[index]["lv_name"]][2] for index in (4, 5)}
@@ -346,6 +350,7 @@ def assert_storage_layout(harness: Harness, fixture: Fixture) -> None:
             require(row.get("pool_lv", "").strip() == disk.get("pool_name", ""), f"pool membership differs for {disk['name']}")
             if disk["storage_type"] == "lvm-thick":
                 require(row["lv_attr"].startswith("-wi"), f"thick disk is not a fully allocated linear LV: {row['lv_attr']}")
+                require(disk.get("wipe_on_create", False) == (disk["storage"] == "thick-wipe"), f"thick wipe policy differs for {disk['name']}")
     for index in (0, 1):
         info = json.loads(run(("qemu-img", "info", "--force-share", "--output=json", roots[index]["path"])).stdout)
         if index == 0:
@@ -471,7 +476,7 @@ def main() -> None:
         harness.replace_topology("pool_size_gib: 9, root_provisioning: snapshot", "pool_size_gib: 9, root_provisioning: copy", count=1)
 
         # Kill TopoLab immediately after one targeted LVM creation; the next up recovers the checkpoint.
-        harness.replace_topology("      - {name: data-1, size_gib: 1, storage: thick}", "      - {name: data-1, size_gib: 1, storage: thick}\n      - {name: interrupted, size_gib: 1, storage: thick}")
+        harness.replace_topology("      - {name: data-1, size_gib: 1, storage: thick-wipe}", "      - {name: data-1, size_gib: 1, storage: thick-wipe}\n      - {name: interrupted, size_gib: 1, storage: thick-wipe}")
         wrapper = fixture.root / "lvm-kill-wrapper"
         real_lvm = shutil.which("lvm")
         require(real_lvm is not None, "lvm disappeared")
@@ -503,7 +508,7 @@ def main() -> None:
         vm6 = vm_block(6, "thin-snapshot", "10.77.0.16").replace("    additional_disks:\n      - {name: data-6, size_gib: 1, storage: file-copy}\n", "")
         harness.replace_topology(vm5, "")
         harness.replace_topology(vm6, "")
-        harness.replace_topology("  - {name: thin-snapshot, type: lvm-thin, volume_group: " + fixture.state["vg"] + ", pool_size_gib: 6, root_provisioning: snapshot}\n", "")
+        harness.replace_topology("  - {name: thin-snapshot, type: lvm-thin, volume_group: " + fixture.state["vg"] + ", pool_size_gib: 6, root_provisioning: snapshot, zero_new_blocks: true}\n", "")
         for number in (5, 6):
             harness.replace_topology(f"  - {{name: vm{number}-lan, endpoints: [{{node: vm{number}, interface: eth0}}, {{node: lan, interface: vm{number}}}]}}\n", "")
         harness.run("up", timeout=600)

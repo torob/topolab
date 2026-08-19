@@ -77,6 +77,12 @@ func validateStorageFields(s *Storage) error {
 		if err := forbidden("pool_size_gib", s.poolSizeGiBSet); err != nil {
 			return err
 		}
+		if err := forbidden("zero_new_blocks", s.zeroNewBlocksSet); err != nil {
+			return err
+		}
+		if err := forbidden("wipe_on_create", s.wipeOnCreateSet); err != nil {
+			return err
+		}
 	case "lvm-thin":
 		if err := required("volume_group", s.VolumeGroup, s.volumeGroupSet); err != nil {
 			return err
@@ -87,6 +93,9 @@ func validateStorageFields(s *Storage) error {
 		if err := required("root_provisioning", s.RootProvisioning, s.rootProvisioningSet); err != nil {
 			return err
 		}
+		if err := forbidden("wipe_on_create", s.wipeOnCreateSet); err != nil {
+			return err
+		}
 	case "lvm-thick":
 		if err := required("volume_group", s.VolumeGroup, s.volumeGroupSet); err != nil {
 			return err
@@ -95,6 +104,9 @@ func validateStorageFields(s *Storage) error {
 			return err
 		}
 		if err := forbidden("root_provisioning", s.rootProvisioningSet); err != nil {
+			return err
+		}
+		if err := forbidden("zero_new_blocks", s.zeroNewBlocksSet); err != nil {
 			return err
 		}
 	default:

@@ -314,24 +314,29 @@ storages:
     volume_group: lab-vg
     pool_size_gib: 20
     root_provisioning: copy
+    zero_new_blocks: true
   - name: thin-snapshot
     type: lvm-thin
     volume_group: lab-vg
     pool_size_gib: 20
     root_provisioning: snapshot
-  - {name: thick, type: lvm-thick, volume_group: lab-vg}
+  - {name: thick, type: lvm-thick, volume_group: lab-vg, wipe_on_create: true}
 ```
 
 | Type | Required | Forbidden |
 | --- | --- | --- |
-| `file` | `name`, `type`, `root_provisioning` | `volume_group`, `pool_size_gib` |
-| `lvm-thin` | `name`, `type`, `volume_group`, `pool_size_gib`, `root_provisioning` | none |
-| `lvm-thick` | `name`, `type`, `volume_group` | `pool_size_gib`, `root_provisioning` |
+| `file` | `name`, `type`, `root_provisioning` | `volume_group`, `pool_size_gib`, `zero_new_blocks`, `wipe_on_create` |
+| `lvm-thin` | `name`, `type`, `volume_group`, `pool_size_gib`, `root_provisioning` | `wipe_on_create` |
+| `lvm-thick` | `name`, `type`, `volume_group` | `pool_size_gib`, `root_provisioning`, `zero_new_blocks` |
 
 `root_provisioning` is exactly `copy` or `snapshot`. A forbidden field is an
 error even if explicitly empty or zero. Multiple declarations may share a
 supplied VG, but every thin declaration owns a distinct deterministic pool.
 `pool_size_gib` is pool data capacity; metadata consumes additional extents.
+`zero_new_blocks` and `wipe_on_create` default to `false`. The former controls
+lazy zeroing of newly allocated thin-pool chunks and is immutable after pool
+creation. The latter controls a full-device overwrite before a newly created
+thick disk is published. Disabling either guarantee can expose stale VG data.
 
 TopoLab resolves `lvm` only for an LVM topology and accepts `--lvm` as an
 executable override. Supplied VGs and PVs are never created or removed. It
@@ -730,10 +735,11 @@ published standalone sparse qcow2 images without backing files. `lvm-thick`
 roots are independent raw copies in fully allocated linear LVs. `lvm-thin`
 copy roots are independent thin LVs; snapshot roots share one read-only
 template LV per storage and template digest and are writable snapshots of it.
-Thin-LV zeroing is enabled and thick LVs are zeroed before publication.
+Thin-pool chunk zeroing and full thick-LV wiping are disabled by default and
+are enabled only by `zero_new_blocks` and `wipe_on_create`, respectively.
 
 Pool, template-base, staging, and disk LV names are deterministic hashes and
-carry topology, storage, and kind ownership tags. Manifest version 2 records
+carry topology, storage, and kind ownership tags. Manifest version 3 records
 VG, LV, and pool UUIDs plus checkpointed resource intent. A retry completes
 interrupted work. Deletion is refused if UUIDs, tags, pool membership, or
 unexpected resources do not match the manifest. Declared thin virtual capacity

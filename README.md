@@ -119,7 +119,8 @@ storages:
     volume_group: lab-vg
     pool_size_gib: 20
     root_provisioning: snapshot
-  - {name: thick, type: lvm-thick, volume_group: lab-vg}
+    zero_new_blocks: true
+  - {name: thick, type: lvm-thick, volume_group: lab-vg, wipe_on_create: true}
 
 vms:
   - name: node
@@ -135,6 +136,14 @@ vms:
 even when explicitly empty or zero. Storage/VG/provisioning changes, disk
 shrinks, and thin-pool reductions are rejected before mutation. Pools and disks
 may grow; thin utilization and overcommit are warnings rather than blockers.
+
+LVM zeroing is opt-in. `zero_new_blocks: true` is valid only for `lvm-thin`
+and makes LVM clear newly allocated pool chunks; the setting is fixed when the
+pool is created. `wipe_on_create: true` is valid only for `lvm-thick` and makes
+TopoLab overwrite the full LV before publishing each new disk. Both default to
+`false`. Disabling them can expose stale VG data through unwritten portions of
+allocated storage. Manifest version 3 is not backward compatible; tear down an
+active topology with the previous TopoLab version before upgrading.
 
 The former top-level `host` key is intentionally unsupported. Rename it to
 `management_host`; if the topology is active under the legacy root datapath,

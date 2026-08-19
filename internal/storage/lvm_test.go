@@ -82,7 +82,7 @@ func (failingRunner) Run(context.Context, string, ...string) ([]byte, error) {
 }
 
 func TestMutationErrorIncludesCommandAndTarget(t *testing.T) {
-	err := NewLVM(failingRunner{}, "/wrapper/lvm").CreateThick(context.Background(), "vg0", "disk0", 1, nil)
+	err := NewLVM(failingRunner{}, "/wrapper/lvm").CreateThick(context.Background(), "vg0", "disk0", 1, false, nil)
 	if err == nil || !strings.Contains(err.Error(), "lvcreate") || !strings.Contains(err.Error(), "vg0") || !strings.Contains(err.Error(), "disk0") {
 		t.Fatalf("error lacks command target context: %v", err)
 	}
@@ -93,13 +93,19 @@ func TestLVMCreationPlansAreTargeted(t *testing.T) {
 	lvm := NewLVM(r, "lvm-test")
 	ctx := context.Background()
 	tags := []string{"topolab", "topolab.kind.disk"}
-	if err := lvm.CreatePool(ctx, "vg0", "pool0", 4<<30, tags); err != nil {
+	if err := lvm.CreatePool(ctx, "vg0", "pool0", 4<<30, false, tags); err != nil {
+		t.Fatal(err)
+	}
+	if err := lvm.CreatePool(ctx, "vg0", "poolz", 4<<30, true, tags); err != nil {
 		t.Fatal(err)
 	}
 	if err := lvm.CreateThin(ctx, "vg0", "pool0", "disk0", 2<<30, tags); err != nil {
 		t.Fatal(err)
 	}
-	if err := lvm.CreateThick(ctx, "vg0", "thick0", 2<<30, tags); err != nil {
+	if err := lvm.CreateThick(ctx, "vg0", "thick0", 2<<30, false, tags); err != nil {
+		t.Fatal(err)
+	}
+	if err := lvm.CreateThick(ctx, "vg0", "thickz", 2<<30, true, tags); err != nil {
 		t.Fatal(err)
 	}
 	if err := lvm.Snapshot(ctx, "vg0", "base0", "root0", tags); err != nil {
@@ -118,7 +124,7 @@ func TestLVMCreationPlansAreTargeted(t *testing.T) {
 	for i, c := range r.calls {
 		joined[i] = fmt.Sprintf("%s %s", c.name, strings.Join(c.args, " "))
 	}
-	wants := []string{"lvcreate --yes --type thin-pool --zero y --size 4294967296B --name pool0", "--thinpool vg0/pool0 --name disk0", "--wipesignatures y --zero y", "--snapshot --name root0", "lvchange --setactivationskip n vg0/root0", "lvchange --activate y vg0/root0", "lvextend --yes --size 3221225472B vg0/disk0", "lvremove --yes vg0/disk0"}
+	wants := []string{"lvcreate --yes --type thin-pool --zero n --size 4294967296B --name pool0", "lvcreate --yes --type thin-pool --zero y --size 4294967296B --name poolz", "--thinpool vg0/pool0 --name disk0", "--wipesignatures y --zero n", "--wipesignatures y --zero y", "--snapshot --name root0", "lvchange --setactivationskip n vg0/root0", "lvchange --activate y vg0/root0", "lvextend --yes --size 3221225472B vg0/disk0", "lvremove --yes vg0/disk0"}
 	for _, want := range wants {
 		found := false
 		for _, got := range joined {

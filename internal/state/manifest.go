@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-const ManifestVersion = 2
+const ManifestVersion = 3
 
 type Manifest struct {
 	Version                  int                                 `json:"version"`
@@ -52,6 +52,8 @@ type Storage struct {
 	PoolSizeBytes    uint64       `json:"pool_size_bytes,omitempty"`
 	DataPercent      float64      `json:"data_percent,omitempty"`
 	MetadataPercent  float64      `json:"metadata_percent,omitempty"`
+	ZeroNewBlocks    bool         `json:"zero_new_blocks,omitempty"`
+	WipeOnCreate     bool         `json:"wipe_on_create,omitempty"`
 	Warnings         []string     `json:"warnings,omitempty"`
 	Pending          string       `json:"pending,omitempty"`
 	Bases            []LVResource `json:"bases,omitempty"`
@@ -128,6 +130,7 @@ type Disk struct {
 	Pending       string   `json:"pending,omitempty"`
 	StagingName   string   `json:"staging_name,omitempty"`
 	StagingUUID   string   `json:"staging_uuid,omitempty"`
+	WipeOnCreate  bool     `json:"wipe_on_create,omitempty"`
 }
 
 type TAP struct {

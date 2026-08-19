@@ -59,6 +59,9 @@ func (a *App) planStorages(ctx context.Context, cfg *config.Config, _ state.Layo
 			if old.RootProvisioning != c.RootProvisioning {
 				return nil, fmt.Errorf("storage %q root_provisioning change is not allowed", c.Name)
 			}
+			if c.Type == "lvm-thin" && old.ZeroNewBlocks != c.ZeroNewBlocks {
+				return nil, fmt.Errorf("storage %q zero_new_blocks change is not allowed", c.Name)
+			}
 		}
 		if c.Type == "file" {
 			continue
@@ -104,6 +107,9 @@ func (a *App) planStorages(ctx context.Context, cfg *config.Config, _ state.Layo
 				}
 				if !storagepkg.HasTags(pool.Tags, storagepkg.Tags(cfg.Name, c.Name, "pool")) {
 					return nil, fmt.Errorf("storage %q pool lacks expected ownership tags", c.Name)
+				}
+				if pool.ZeroNewBlocks != c.ZeroNewBlocks {
+					return nil, fmt.Errorf("storage %q thin pool zeroing is %t, want zero_new_blocks=%t", c.Name, pool.ZeroNewBlocks, c.ZeroNewBlocks)
 				}
 			}
 		}
@@ -377,7 +383,7 @@ func (a *App) reconcileStorages(ctx context.Context, cfg *config.Config, layout 
 	for _, c := range cfg.Storages {
 		r := m.Storages[c.Name]
 		if r == nil {
-			r = &state.Storage{Name: c.Name, Type: c.Type, RootProvisioning: c.RootProvisioning, VolumeGroup: c.VolumeGroup}
+			r = &state.Storage{Name: c.Name, Type: c.Type, RootProvisioning: c.RootProvisioning, VolumeGroup: c.VolumeGroup, ZeroNewBlocks: c.ZeroNewBlocks, WipeOnCreate: c.WipeOnCreate}
 			m.Storages[c.Name] = r
 			if err := state.Save(layout.ManifestPath, m); err != nil {
 				return err
@@ -386,6 +392,7 @@ func (a *App) reconcileStorages(ctx context.Context, cfg *config.Config, layout 
 		if c.Type == "file" {
 			continue
 		}
+		r.WipeOnCreate = c.WipeOnCreate
 		vg, err := a.LVM.LookupVG(ctx, c.VolumeGroup)
 		if err != nil {
 			return err
@@ -397,6 +404,7 @@ func (a *App) reconcileStorages(ctx context.Context, cfg *config.Config, layout 
 			}
 			continue
 		}
+		r.ZeroNewBlocks = c.ZeroNewBlocks
 		want, err := qemu.GiBToBytes(c.PoolSizeGiB)
 		if err != nil {
 			return err
@@ -415,6 +423,9 @@ func (a *App) reconcileStorages(ctx context.Context, cfg *config.Config, layout 
 			}
 			if r.PoolUUID != "" && r.PoolUUID != lv.UUID {
 				return fmt.Errorf("storage %q pool UUID changed", c.Name)
+			}
+			if lv.ZeroNewBlocks != c.ZeroNewBlocks {
+				return fmt.Errorf("storage %q thin pool zeroing is %t, want zero_new_blocks=%t", c.Name, lv.ZeroNewBlocks, c.ZeroNewBlocks)
 			}
 			minimum := lv.SizeBytes
 			if r.PoolRequested != 0 {
@@ -454,7 +465,7 @@ func (a *App) reconcileStorages(ctx context.Context, cfg *config.Config, layout 
 			if err := state.Save(layout.ManifestPath, m); err != nil {
 				return err
 			}
-			if err := a.LVM.CreatePool(ctx, c.VolumeGroup, name, want, tags); err != nil {
+			if err := a.LVM.CreatePool(ctx, c.VolumeGroup, name, want, c.ZeroNewBlocks, tags); err != nil {
 				return err
 			}
 			lvs, err = a.LVM.LVs(ctx, c.VolumeGroup)
@@ -464,6 +475,9 @@ func (a *App) reconcileStorages(ctx context.Context, cfg *config.Config, layout 
 			lv, exists = storagepkg.FindLV(lvs, name)
 			if !exists {
 				return fmt.Errorf("created thin pool %s is absent", name)
+			}
+			if lv.ZeroNewBlocks != c.ZeroNewBlocks {
+				return fmt.Errorf("created thin pool %s zeroing is %t, want %t", name, lv.ZeroNewBlocks, c.ZeroNewBlocks)
 			}
 		}
 		r.PoolUUID, r.PoolRequested, r.PoolSizeBytes, r.DataPercent, r.MetadataPercent, r.Pending = lv.UUID, want, lv.SizeBytes, lv.DataPercent, lv.MetadataPercent, ""
@@ -655,7 +669,7 @@ func (a *App) createDisk(ctx context.Context, cfg *config.Config, layout state.L
 			}
 			removeStagingTag = true
 		}
-		if d.Pending != "" && d.StorageType == "lvm-thick" {
+		if d.Pending != "" && d.StorageType == "lvm-thick" && d.WipeOnCreate {
 			lvs, e := a.LVM.LVs(ctx, d.VolumeGroup)
 			if e != nil {
 				return e
@@ -731,7 +745,7 @@ func (a *App) createDisk(ctx context.Context, cfg *config.Config, layout state.L
 				if vg.UUID != m.Storages[d.Storage].VGUUID || vg.FreeBytes < d.CapacityBytes {
 					return fmt.Errorf("thick staging disk %s failed VG identity/capacity revalidation", d.Name)
 				}
-				e = a.LVM.CreateThick(ctx, d.VolumeGroup, stage, d.CapacityBytes, creationTags)
+				e = a.LVM.CreateThick(ctx, d.VolumeGroup, stage, d.CapacityBytes, d.WipeOnCreate, creationTags)
 			} else {
 				e = a.LVM.CreateThin(ctx, d.VolumeGroup, d.PoolName, stage, d.CapacityBytes, creationTags)
 			}
@@ -760,7 +774,7 @@ func (a *App) createDisk(ctx context.Context, cfg *config.Config, layout state.L
 		if err := state.Save(layout.ManifestPath, m); err != nil {
 			return err
 		}
-		if backend.Type == "lvm-thick" {
+		if backend.Type == "lvm-thick" && d.WipeOnCreate {
 			if e := a.ZeroBlockDevice(storagepkg.DevicePath(d.VolumeGroup, stage), stageLV.SizeBytes); e != nil {
 				return fmt.Errorf("securely zero thick staging disk %s: %w", d.Name, e)
 			}
@@ -787,7 +801,7 @@ func (a *App) createDisk(ctx context.Context, cfg *config.Config, layout state.L
 		if vg.UUID != m.Storages[d.Storage].VGUUID || vg.FreeBytes < d.CapacityBytes {
 			return fmt.Errorf("thick disk %s failed VG identity/capacity revalidation", d.Name)
 		}
-		err = a.LVM.CreateThick(ctx, d.VolumeGroup, d.LVName, d.CapacityBytes, d.OwnershipTags)
+		err = a.LVM.CreateThick(ctx, d.VolumeGroup, d.LVName, d.CapacityBytes, d.WipeOnCreate, d.OwnershipTags)
 	} else if root && d.Provisioning == "snapshot" {
 		base := storagepkg.BaseName(cfg.Name, backend.Name, template.Digest)
 		baseTags := storagepkg.Tags(cfg.Name, backend.Name, "base")
@@ -903,7 +917,7 @@ func (a *App) createDisk(ctx context.Context, cfg *config.Config, layout state.L
 	if !storagepkg.HasTags(lv.Tags, d.OwnershipTags) || (d.PoolName != "" && lv.Pool != d.PoolName) || lv.VGUUID != m.Storages[d.Storage].VGUUID || lv.SizeBytes < d.CapacityBytes {
 		return fmt.Errorf("created LV %s failed ownership/capacity verification", d.LVName)
 	}
-	if backend.Type == "lvm-thick" && !root {
+	if backend.Type == "lvm-thick" && !root && d.WipeOnCreate {
 		if err := a.ZeroBlockDevice(d.Path, lv.SizeBytes); err != nil {
 			return fmt.Errorf("securely zero thick disk %s: %w", d.Name, err)
 		}
@@ -1065,6 +1079,8 @@ func (a *App) psStorages(ctx context.Context, cfg *config.Config, m *state.Manif
 				p.State, p.DriftError = "drift", err.Error()
 			} else if pool, ok := storagepkg.FindLV(lvs, r.PoolName); !ok || pool.UUID != r.PoolUUID {
 				p.State, p.DriftError = "drift", "thin pool identity changed"
+			} else if pool.ZeroNewBlocks != c.ZeroNewBlocks {
+				p.State, p.DriftError = "drift", fmt.Sprintf("thin pool zeroing is %t, want zero_new_blocks=%t", pool.ZeroNewBlocks, c.ZeroNewBlocks)
 			} else {
 				p.DataPercent, p.MetadataPercent, p.PhysicalCapacityBytes = pool.DataPercent, pool.MetadataPercent, pool.SizeBytes
 			}

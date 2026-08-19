@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -70,12 +71,15 @@ func TestSharedLocksCoexistAndBlockExclusiveLock(t *testing.T) {
 }
 
 func TestLegacyManifestIsRejectedWithoutMigration(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "manifest.json")
-	if err := os.WriteFile(path, []byte(`{"version":1,"topology":"legacy","host_interfaces":{"management":{"logical_name":"management"}},"network_state":{"topology":"legacy"}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "unsupported manifest version 1") {
-		t.Fatalf("legacy manifest error = %v", err)
+	for _, version := range []int{1, 2} {
+		path := filepath.Join(t.TempDir(), "manifest.json")
+		data := fmt.Sprintf(`{"version":%d,"topology":"legacy"}`, version)
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(path); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("unsupported manifest version %d", version)) {
+			t.Fatalf("legacy manifest version %d error = %v", version, err)
+		}
 	}
 }
 

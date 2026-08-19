@@ -190,7 +190,7 @@ func TestStoragePlanRefusesUnexpectedLVInManagedPool(t *testing.T) {
 	topology, storageName, vg := "lab", "thin", "vg0"
 	pool := storagepkg.PoolName(topology, storageName)
 	tags := strings.Join(storagepkg.Tags(topology, storageName, "pool"), ",")
-	runner := &storageRunner{vgJSON: `{"report":[{"vg":[{"vg_name":"vg0","vg_uuid":"vg-id","vg_size":"10737418240","vg_free":"5368709120","pv_count":"1"}]}]}`, lvJSON: fmt.Sprintf(`{"report":[{"lv":[{"lv_name":%q,"lv_uuid":"pool-id","vg_name":"vg0","vg_uuid":"vg-id","lv_size":"4294967296","pool_lv":"","origin":"","lv_attr":"twi-a-tz--","lv_tags":%q,"data_percent":"1","metadata_percent":"1"},{"lv_name":"foreign","lv_uuid":"foreign-id","vg_name":"vg0","vg_uuid":"vg-id","lv_size":"1048576","pool_lv":%q,"origin":"","lv_attr":"Vwi-a-tz--","lv_tags":"","data_percent":"","metadata_percent":""}]}]}`, pool, tags, pool)}
+	runner := &storageRunner{vgJSON: `{"report":[{"vg":[{"vg_name":"vg0","vg_uuid":"vg-id","vg_size":"10737418240","vg_free":"5368709120","pv_count":"1"}]}]}`, lvJSON: fmt.Sprintf(`{"report":[{"lv":[{"lv_name":%q,"lv_uuid":"pool-id","vg_name":"vg0","vg_uuid":"vg-id","lv_size":"4294967296","pool_lv":"","origin":"","lv_attr":"twi-a-t---","lv_tags":%q,"data_percent":"1","metadata_percent":"1"},{"lv_name":"foreign","lv_uuid":"foreign-id","vg_name":"vg0","vg_uuid":"vg-id","lv_size":"1048576","pool_lv":%q,"origin":"","lv_attr":"Vwi-a-tz--","lv_tags":"","data_percent":"","metadata_percent":""}]}]}`, pool, tags, pool)}
 	a := New(nil, nil)
 	a.LVM = storagepkg.NewLVM(runner, "lvm-test")
 	cfg := &config.Config{Name: topology, Storages: []*config.Storage{{Name: storageName, Type: "lvm-thin", VolumeGroup: vg, PoolSizeGiB: 4, RootProvisioning: "copy"}}}
@@ -198,6 +198,61 @@ func TestStoragePlanRefusesUnexpectedLVInManagedPool(t *testing.T) {
 	m.Storages[storageName] = &state.Storage{Name: storageName, Type: "lvm-thin", VolumeGroup: vg, VGUUID: "vg-id", PoolName: pool, PoolUUID: "pool-id", PoolSizeBytes: 4 << 30, RootProvisioning: "copy"}
 	if _, err := a.planStorages(context.Background(), cfg, state.Layout{}, m); err == nil || !strings.Contains(err.Error(), "unexpected") {
 		t.Fatalf("plan error = %v", err)
+	}
+}
+
+func TestStoragePlanRefusesThinPoolZeroModeMismatch(t *testing.T) {
+	topology, storageName, vg := "lab", "thin", "vg0"
+	pool := storagepkg.PoolName(topology, storageName)
+	tags := strings.Join(storagepkg.Tags(topology, storageName, "pool"), ",")
+	runner := &storageRunner{
+		vgJSON: `{"report":[{"vg":[{"vg_name":"vg0","vg_uuid":"vg-id","vg_size":"10737418240","vg_free":"5368709120","pv_count":"1"}]}]}`,
+		lvJSON: fmt.Sprintf(`{"report":[{"lv":[{"lv_name":%q,"lv_uuid":"pool-id","vg_name":"vg0","vg_uuid":"vg-id","lv_size":"4294967296","pool_lv":"","origin":"","lv_attr":"twi-a-tz--","lv_tags":%q,"data_percent":"1","metadata_percent":"1"}]}]}`, pool, tags),
+	}
+	a := New(nil, nil)
+	a.LVM = storagepkg.NewLVM(runner, "lvm-test")
+	cfg := &config.Config{Name: topology, Storages: []*config.Storage{{Name: storageName, Type: "lvm-thin", VolumeGroup: vg, PoolSizeGiB: 4, RootProvisioning: "copy"}}}
+	m := state.NewManifest(topology)
+	m.Storages[storageName] = &state.Storage{Name: storageName, Type: "lvm-thin", VolumeGroup: vg, VGUUID: "vg-id", PoolName: pool, PoolUUID: "pool-id", PoolSizeBytes: 4 << 30, RootProvisioning: "copy"}
+	if _, err := a.planStorages(context.Background(), cfg, state.Layout{}, m); err == nil || !strings.Contains(err.Error(), "thin pool zeroing is true, want zero_new_blocks=false") {
+		t.Fatalf("plan error = %v", err)
+	}
+	for _, call := range runner.calls {
+		if strings.Contains(call, " lvchange ") {
+			t.Fatalf("zero mode mismatch was mutated: %v", runner.calls)
+		}
+	}
+}
+
+func TestThickRecoveryHonorsRecordedWipePolicy(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		wipe      bool
+		wantWipes int
+	}{{"disabled", false, 0}, {"enabled", true, 1}} {
+		t.Run(test.name, func(t *testing.T) {
+			disk := storagepkg.DiskName("lab", "vm", "root")
+			tags := storagepkg.Tags("lab", "thick", "disk")
+			runner := &storageRunner{lvJSON: fmt.Sprintf(`{"report":[{"lv":[{"lv_name":%q,"lv_uuid":"disk-id","vg_name":"vg0","vg_uuid":"vg-id","lv_size":"4294967296","pool_lv":"","origin":"","lv_attr":"-wi-a-----","lv_tags":%q,"data_percent":"","metadata_percent":""}]}]}`, disk, strings.Join(tags, ","))}
+			images := &recoveryImages{checkpointImages: checkpointImages{sizes: map[string]uint64{}}}
+			a := New(nil, nil)
+			a.LVM = storagepkg.NewLVM(runner, "lvm-test")
+			a.Images = images
+			wipes := 0
+			a.ZeroBlockDevice = func(string, uint64) error { wipes++; return nil }
+			cfg := &config.Config{Name: "lab", Storages: []*config.Storage{{Name: "thick", Type: "lvm-thick", VolumeGroup: "vg0", WipeOnCreate: !test.wipe}}}
+			m := state.NewManifest("lab")
+			m.Storages["thick"] = &state.Storage{Name: "thick", Type: "lvm-thick", VolumeGroup: "vg0", VGUUID: "vg-id"}
+			d := &state.Disk{Name: "root", Path: storagepkg.DevicePath("vg0", disk), Storage: "thick", StorageType: "lvm-thick", Format: "raw", VolumeGroup: "vg0", VGUUID: "vg-id", LVName: disk, LVUUID: "disk-id", OwnershipTags: tags, Pending: "create", WipeOnCreate: test.wipe}
+			n := &state.Node{RootDisk: d}
+			layout := state.Layout{ManifestPath: filepath.Join(t.TempDir(), "manifest.json")}
+			if err := a.createDisk(context.Background(), cfg, layout, m, "vm", n, d, qemu.TemplateInfo{Path: "/template"}, true); err != nil {
+				t.Fatal(err)
+			}
+			if wipes != test.wantWipes || images.conversions != 1 || d.Pending != "" {
+				t.Fatalf("wipes=%d conversions=%d disk=%#v", wipes, images.conversions, d)
+			}
+		})
 	}
 }
 

@@ -103,6 +103,8 @@ func diskRecord(name, path, bus string, capacity uint64, options ...any) *state.
 		d.OwnershipTags = storagepkg.Tags(topology, storage.Name, "disk")
 		if storage.Type == "lvm-thin" {
 			d.PoolName = storagepkg.PoolName(topology, storage.Name)
+		} else if storage.Type == "lvm-thick" {
+			d.WipeOnCreate = storage.WipeOnCreate
 		}
 	}
 	return d

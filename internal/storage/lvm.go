@@ -51,6 +51,7 @@ type LV struct {
 	SizeBytes                                uint64
 	DataPercent, MetadataPercent             float64
 	Attr                                     string
+	ZeroNewBlocks                            bool
 	Tags                                     []string
 }
 
@@ -232,7 +233,8 @@ func (l *LVM) LVs(ctx context.Context, vg string) ([]LV, error) {
 				}
 			}
 			sort.Strings(tags)
-			result = append(result, LV{Name: name, UUID: uuid, VGName: vgName, VGUUID: vgUUID, SizeBytes: size, Pool: strings.TrimSpace(row["pool_lv"]), Origin: strings.TrimSpace(row["origin"]), Attr: strings.TrimSpace(row["lv_attr"]), Tags: tags, DataPercent: data, MetadataPercent: meta})
+			attr := strings.TrimSpace(row["lv_attr"])
+			result = append(result, LV{Name: name, UUID: uuid, VGName: vgName, VGUUID: vgUUID, SizeBytes: size, Pool: strings.TrimSpace(row["pool_lv"]), Origin: strings.TrimSpace(row["origin"]), Attr: attr, ZeroNewBlocks: len(attr) > 7 && attr[7] == 'z', Tags: tags, DataPercent: data, MetadataPercent: meta})
 		}
 	}
 	return result, nil
@@ -284,11 +286,15 @@ func tagArgs(tags []string) []string {
 }
 func bytesArg(n uint64) string { return strconv.FormatUint(n, 10) + "B" }
 
-func (l *LVM) CreatePool(ctx context.Context, vg, name string, bytes uint64, tags []string) error {
+func (l *LVM) CreatePool(ctx context.Context, vg, name string, bytes uint64, zeroNewBlocks bool, tags []string) error {
 	if bytes == 0 {
 		return errors.New("thin pool size must be positive")
 	}
-	args := []string{"lvcreate", "--yes", "--type", "thin-pool", "--zero", "y", "--size", bytesArg(bytes), "--name", name}
+	zero := "n"
+	if zeroNewBlocks {
+		zero = "y"
+	}
+	args := []string{"lvcreate", "--yes", "--type", "thin-pool", "--zero", zero, "--size", bytesArg(bytes), "--name", name}
 	args = append(args, tagArgs(tags)...)
 	args = append(args, vg)
 	_, err := l.run(ctx, args...)
@@ -302,8 +308,12 @@ func (l *LVM) CreateThin(ctx context.Context, vg, pool, name string, bytes uint6
 	_, err := l.run(ctx, args...)
 	return err
 }
-func (l *LVM) CreateThick(ctx context.Context, vg, name string, bytes uint64, tags []string) error {
-	args := []string{"lvcreate", "--yes", "--wipesignatures", "y", "--zero", "y", "--size", bytesArg(bytes), "--name", name}
+func (l *LVM) CreateThick(ctx context.Context, vg, name string, bytes uint64, zero bool, tags []string) error {
+	zeroMode := "n"
+	if zero {
+		zeroMode = "y"
+	}
+	args := []string{"lvcreate", "--yes", "--wipesignatures", "y", "--zero", zeroMode, "--size", bytesArg(bytes), "--name", name}
 	args = append(args, tagArgs(tags)...)
 	args = append(args, vg)
 	_, err := l.run(ctx, args...)
