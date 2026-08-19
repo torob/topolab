@@ -11,6 +11,7 @@ import (
 
 	"github.com/torob/topolab/internal/network"
 	"github.com/torob/topolab/internal/state"
+	storagepkg "github.com/torob/topolab/internal/storage"
 )
 
 // verifyTopologyTree prevents down from recursively or implicitly deleting an
@@ -66,6 +67,31 @@ func validateManifestPaths(layout state.Layout, m *state.Manifest) error {
 	if m == nil {
 		return nil
 	}
+	for name, storage := range m.Storages {
+		if storage == nil || name == "" || storage.Name != name || strings.ContainsAny(name, "/\x00") {
+			return fmt.Errorf("manifest storage %q is invalid", name)
+		}
+		switch storage.Type {
+		case "file":
+			if storage.VolumeGroup != "" || storage.PoolName != "" {
+				return fmt.Errorf("manifest file storage %q contains LVM identity", name)
+			}
+		case "lvm-thin", "lvm-thick":
+			if !storagepkg.ValidName(storage.VolumeGroup) {
+				return fmt.Errorf("manifest storage %q has unsafe volume group", name)
+			}
+			if storage.PoolName != "" && !storagepkg.ValidName(storage.PoolName) {
+				return fmt.Errorf("manifest storage %q has unsafe pool name", name)
+			}
+			for _, base := range storage.Bases {
+				if !storagepkg.ValidName(base.Name) {
+					return fmt.Errorf("manifest storage %q has unsafe template base", name)
+				}
+			}
+		default:
+			return fmt.Errorf("manifest storage %q has invalid type %q", name, storage.Type)
+		}
+	}
 	for name, n := range m.Nodes {
 		if n == nil {
 			return fmt.Errorf("manifest node %q is null", name)
@@ -100,11 +126,16 @@ func validateManifestPaths(layout state.Layout, m *state.Manifest) error {
 				}
 			}
 		}
-		if n.RootDisk != nil && filepath.Clean(n.RootDisk.Path) != filepath.Join(dir, "root.qcow2") {
+		if n.RootDisk != nil && (n.RootDisk.StorageType == "file" || n.RootDisk.StorageType == "") && filepath.Clean(n.RootDisk.Path) != filepath.Join(dir, "root.qcow2") {
 			return fmt.Errorf("manifest node %s has unsafe root disk path %s", name, n.RootDisk.Path)
 		}
-		if n.RootDisk != nil {
+		if n.RootDisk != nil && (n.RootDisk.StorageType == "file" || n.RootDisk.StorageType == "") {
 			if err := rejectSymlinkComponents(layout.WorkingDir, n.RootDisk.Path); err != nil {
+				return fmt.Errorf("manifest node %s root disk: %w", name, err)
+			}
+		}
+		if n.RootDisk != nil {
+			if err := validateManifestDiskBackend(m, name, n.RootDisk, true); err != nil {
 				return fmt.Errorf("manifest node %s root disk: %w", name, err)
 			}
 		}
@@ -114,12 +145,17 @@ func validateManifestPaths(layout state.Layout, m *state.Manifest) error {
 				return fmt.Errorf("manifest node %s has invalid additional disk name %q", name, disk.Name)
 			}
 			seenDisks[disk.Name] = true
+			if err := validateManifestDiskBackend(m, name, &disk, false); err != nil {
+				return fmt.Errorf("manifest node %s disk %s: %w", name, disk.Name, err)
+			}
 			expectedPath := filepath.Join(dir, "disk-"+state.ShortID(disk.Name, 12)+".qcow2")
-			if filepath.Clean(disk.Path) != expectedPath {
+			if (disk.StorageType == "file" || disk.StorageType == "") && filepath.Clean(disk.Path) != expectedPath {
 				return fmt.Errorf("manifest node %s has unsafe disk path %s", name, disk.Path)
 			}
-			if err := rejectSymlinkComponents(layout.WorkingDir, disk.Path); err != nil {
-				return fmt.Errorf("manifest node %s disk %s: %w", name, disk.Name, err)
+			if disk.StorageType == "file" || disk.StorageType == "" {
+				if err := rejectSymlinkComponents(layout.WorkingDir, disk.Path); err != nil {
+					return fmt.Errorf("manifest node %s disk %s: %w", name, disk.Name, err)
+				}
 			}
 		}
 	}
@@ -143,6 +179,67 @@ func validateManifestPaths(layout state.Layout, m *state.Manifest) error {
 				return fmt.Errorf("manifest helper %s %s: %w", key, kind, err)
 			}
 		}
+	}
+	return nil
+}
+
+func validateManifestDiskBackend(m *state.Manifest, node string, d *state.Disk, root bool) error {
+	if d == nil {
+		return nil
+	}
+	switch d.StorageType {
+	case "", "file":
+		if d.Format != "" && d.Format != "qcow2" {
+			return fmt.Errorf("file disk has format %q", d.Format)
+		}
+		if d.StorageType == "file" {
+			s := m.Storages[d.Storage]
+			if s == nil || s.Type != "file" || (root && d.Provisioning != s.RootProvisioning) || (!root && d.Provisioning != "") {
+				return fmt.Errorf("file disk has inconsistent storage or provisioning identity")
+			}
+		}
+	case "lvm-thin", "lvm-thick":
+		s := m.Storages[d.Storage]
+		if s == nil || s.Type != d.StorageType || s.VolumeGroup != d.VolumeGroup {
+			return fmt.Errorf("LVM disk references inconsistent storage identity")
+		}
+		if d.Storage == "" || d.Format != "raw" || !storagepkg.ValidName(d.VolumeGroup) || d.LVName != storagepkg.DiskName(m.Topology, node, d.Name) || d.Path != storagepkg.DevicePath(d.VolumeGroup, d.LVName) {
+			return fmt.Errorf("LVM disk has inconsistent path, identity, or format")
+		}
+		expectedTags := storagepkg.Tags(m.Topology, d.Storage, "disk")
+		if len(d.OwnershipTags) != len(expectedTags) || !storagepkg.HasTags(d.OwnershipTags, expectedTags) {
+			return fmt.Errorf("LVM disk has inconsistent ownership tags")
+		}
+		if d.StorageType == "lvm-thin" {
+			if d.PoolName != storagepkg.PoolName(m.Topology, d.Storage) || (s.PoolName != "" && d.PoolName != s.PoolName) {
+				return fmt.Errorf("thin disk has inconsistent pool identity")
+			}
+		} else if d.PoolName != "" || d.PoolUUID != "" || d.OriginName != "" || d.OriginUUID != "" {
+			return fmt.Errorf("thick disk contains thin identity")
+		}
+		if root {
+			if d.Provisioning != s.RootProvisioning {
+				return fmt.Errorf("root disk has inconsistent provisioning identity")
+			}
+		} else if d.Provisioning != "" {
+			return fmt.Errorf("data disk contains root provisioning identity")
+		}
+		if d.StagingName != "" && d.StagingName != storagepkg.StagingName(m.Topology, node, d.Name) {
+			return fmt.Errorf("LVM disk has inconsistent staging identity")
+		}
+		if d.OriginName != "" {
+			matched := false
+			for _, base := range s.Bases {
+				if base.Name == d.OriginName && (d.OriginUUID == "" || base.UUID == d.OriginUUID) {
+					matched = true
+				}
+			}
+			if !matched {
+				return fmt.Errorf("thin snapshot has inconsistent origin identity")
+			}
+		}
+	default:
+		return fmt.Errorf("disk has unsupported storage type %q", d.StorageType)
 	}
 	return nil
 }

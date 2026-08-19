@@ -154,6 +154,9 @@ func ensureSlices(c *Config) {
 	if c.Templates == nil {
 		c.Templates = []*Template{}
 	}
+	if c.Storages == nil {
+		c.Storages = []*Storage{}
+	}
 	if c.ManagementHost.Interfaces == nil {
 		c.ManagementHost.Interfaces = []*ManagementHostInterface{}
 	}

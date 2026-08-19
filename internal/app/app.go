@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"slices"
 	"time"
 
@@ -19,6 +21,7 @@ import (
 	"github.com/torob/topolab/internal/preflight"
 	"github.com/torob/topolab/internal/qemu"
 	"github.com/torob/topolab/internal/state"
+	storagepkg "github.com/torob/topolab/internal/storage"
 )
 
 type Command struct {
@@ -32,6 +35,7 @@ type Command struct {
 type HelperOverrides struct {
 	QEMUSystem string
 	QEMUImg    string
+	LVM        string
 	OVMFCode   string
 	OVMFVars   string
 	Xorriso    string
@@ -44,6 +48,10 @@ type imageManager interface {
 	CreateDataDisk(context.Context, string, uint64) error
 	ResizeOffline(context.Context, qemu.Growth) error
 	ResizeOnline(context.Context, qemu.BlockResizer, qemu.Growth) error
+}
+type copyImageManager interface {
+	CreateCopy(context.Context, string, qemu.TemplateInfo, uint64) error
+	ConvertToRaw(context.Context, string, string) error
 }
 type seedBuilder interface {
 	Build(context.Context, string, cloudinit.Seed) error
@@ -64,6 +72,7 @@ type App struct {
 	Stdout, Stderr  io.Writer
 	Network         network.HostNetwork
 	Images          imageManager
+	LVM             *storagepkg.LVM
 	Seeds           seedBuilder
 	QEMUBuilder     *qemu.Builder
 	StartProcess    func([]string, []*os.File) (*qemu.StartedProcess, error)
@@ -76,11 +85,13 @@ type App struct {
 	Executable      func() (string, error)
 	VhostAvailable  func() bool
 	GuestAgentProbe func(context.Context, string) bool
+	ZeroBlockDevice func(string, uint64) error
 	OVMFCode        string
 	OVMFVars        string
 	imagesDefault   bool
 	seedsDefault    bool
 	qemuDefault     bool
+	lvmDefault      bool
 }
 
 func New(stdout, stderr io.Writer) *App {
@@ -88,14 +99,14 @@ func New(stdout, stderr io.Writer) *App {
 }
 
 func (a *App) defaults() {
-	if a.Stdin == nil {
-		a.Stdin = os.Stdin
-	}
 	if a.Stdout == nil {
 		a.Stdout = io.Discard
 	}
 	if a.Stderr == nil {
 		a.Stderr = io.Discard
+	}
+	if a.Stdin == nil {
+		a.Stdin = os.Stdin
 	}
 	if a.Network == nil {
 		a.Network = network.New(nil, network.Options{})
@@ -103,6 +114,10 @@ func (a *App) defaults() {
 	if a.Images == nil {
 		a.Images = qemu.NewImageManager(nil, "")
 		a.imagesDefault = true
+	}
+	if a.LVM == nil {
+		a.LVM = storagepkg.NewLVM(nil, "")
+		a.lvmDefault = true
 	}
 	if a.Seeds == nil {
 		a.Seeds = cloudinit.NewISOBuilder(nil, "")
@@ -148,6 +163,9 @@ func (a *App) defaults() {
 	if a.GuestAgentProbe == nil {
 		a.GuestAgentProbe = qemu.GuestAgentAvailable
 	}
+	if a.ZeroBlockDevice == nil {
+		a.ZeroBlockDevice = zeroBlockDevice
+	}
 }
 
 func (a *App) Run(ctx context.Context, command Command) error {
@@ -164,6 +182,11 @@ func (a *App) Run(ctx context.Context, command Command) error {
 		m, err := state.Load(layout.ManifestPath)
 		if err != nil {
 			return err
+		}
+		if command.Name == "ps" {
+			if err := a.configureLVM(command.Topology, m, command.Helpers); err != nil {
+				return err
+			}
 		}
 		if err := validateManifestPaths(layout, m); err != nil {
 			return err
@@ -234,7 +257,12 @@ func (a *App) Run(ctx context.Context, command Command) error {
 		if err != nil {
 			return err
 		}
-		if command.Name == "up" && m != nil && m.DatapathVersion < network.DatapathVersion {
+		if command.Name != "stop" {
+			if err := a.configureLVM(command.Topology, m, command.Helpers); err != nil {
+				return err
+			}
+		}
+		if command.Name == "up" && requiresLegacyDatapathDown(m) {
 			return errors.New("active topology uses the legacy root datapath; run topolab down before up")
 		}
 		if err := validateManifestPaths(layout, m); err != nil {
@@ -262,6 +290,13 @@ func (a *App) Run(ctx context.Context, command Command) error {
 		}
 	}
 	return fmt.Errorf("unknown runtime command %q", command.Name)
+}
+
+func requiresLegacyDatapathDown(m *state.Manifest) bool {
+	// Storage and disk write-ahead checkpoints can legitimately precede the
+	// first network apply. DatapathVersion zero therefore means "not created",
+	// not a legacy active datapath.
+	return m != nil && m.DatapathVersion > 0 && m.DatapathVersion < network.DatapathVersion
 }
 
 func (a *App) runtimePreflight(cfg *config.Config, overrides HelperOverrides) error {
@@ -345,6 +380,44 @@ func (a *App) runtimePreflight(cfg *config.Config, overrides HelperOverrides) er
 	return a.Preflight(preflight.Options{NeedsDNSMasq: needsDNS, RequireVM: len(cfg.VMs) > 0, Helpers: paths, HelpersResolved: len(cfg.VMs) > 0, CPUModels: cpus, DeviceModels: devices, CPUPlans: plans})
 }
 
+func (a *App) configureLVM(cfg *config.Config, manifest *state.Manifest, overrides HelperOverrides) error {
+	needsLVM := false
+	for _, s := range cfg.Storages {
+		if s.Type != "file" {
+			needsLVM = true
+		}
+	}
+	if manifest != nil {
+		for _, s := range manifest.Storages {
+			if s != nil && s.Type != "file" {
+				needsLVM = true
+			}
+		}
+	}
+	if needsLVM && (a.LVM == nil || a.lvmDefault || overrides.LVM != "") {
+		path := overrides.LVM
+		var err error
+		if path == "" {
+			path, err = exec.LookPath("lvm")
+		} else {
+			path, err = filepath.Abs(path)
+		}
+		if err != nil {
+			return fmt.Errorf("resolve lvm executable: %w", err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			return fmt.Errorf("inspect lvm executable: %w", err)
+		}
+		if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+			return fmt.Errorf("lvm executable is not an executable regular file: %s", path)
+		}
+		a.LVM = storagepkg.NewLVM(nil, path)
+		a.lvmDefault = false
+	}
+	return nil
+}
+
 func (a *App) up(ctx context.Context, cfg *config.Config, layout state.Layout, old *state.Manifest) error {
 	if old != nil && old.Topology != cfg.Name {
 		return fmt.Errorf("manifest belongs to topology %q", old.Topology)
@@ -371,9 +444,27 @@ func (a *App) up(ctx context.Context, cfg *config.Config, layout state.Layout, o
 	if err := a.validateExisting(ctx, old, desired); err != nil {
 		return err
 	}
+	vgLocks, err := a.planStorages(ctx, cfg, layout, old)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		for i := len(vgLocks) - 1; i >= 0; i-- {
+			_ = vgLocks[i].Close()
+		}
+	}()
+	if err := a.verifyManifestStorage(ctx, old, false); err != nil {
+		return err
+	}
 
 	if old == nil {
 		old = state.NewManifest(cfg.Name)
+	}
+	if err := a.reconcileStorages(ctx, cfg, layout, old); err != nil {
+		return err
+	}
+	if err := a.updateStorageWarnings(cfg, desired, layout, old); err != nil {
+		return err
 	}
 	netState := oldNetwork(old)
 	rebuild := old.HostNetworkHash != networkHash || netState == nil
@@ -421,7 +512,7 @@ func (a *App) up(ctx context.Context, cfg *config.Config, layout state.Layout, o
 	for name, node := range old.Nodes {
 		d := desired[name]
 		if d == nil {
-			if err := removeRecordedNode(layout, name, node); err != nil {
+			if err := a.removeRecordedNode(ctx, layout, name, node, old.Storages); err != nil {
 				return err
 			}
 			delete(old.Nodes, name)
@@ -432,7 +523,7 @@ func (a *App) up(ctx context.Context, cfg *config.Config, layout state.Layout, o
 		}
 		if d.StorageIdentityHash != node.StorageIdentityHash {
 			if node.RootDisk != nil {
-				if err := os.Remove(node.RootDisk.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				if err := a.removeDisk(ctx, node.RootDisk); err != nil {
 					return err
 				}
 				node.RootDisk = nil
@@ -463,7 +554,7 @@ func (a *App) up(ctx context.Context, cfg *config.Config, layout state.Layout, o
 		for i := 0; i < len(node.AdditionalDisks); {
 			disk := node.AdditionalDisks[i]
 			if !wanted[disk.Name] {
-				if err := os.Remove(disk.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				if err := a.removeDisk(ctx, &disk); err != nil {
 					return err
 				}
 				node.AdditionalDisks = append(node.AdditionalDisks[:i], node.AdditionalDisks[i+1:]...)
@@ -474,6 +565,9 @@ func (a *App) up(ctx context.Context, cfg *config.Config, layout state.Layout, o
 			}
 			i++
 		}
+	}
+	if err := a.removeUndeclaredStorages(ctx, cfg, layout, old); err != nil {
+		return err
 	}
 
 	if netState == nil {
@@ -590,6 +684,9 @@ func (a *App) validateExisting(ctx context.Context, old *state.Manifest, desired
 		if got == nil {
 			continue
 		}
+		if got.RootDisk != nil && want.RootDisk != nil && got.RootDisk.Storage != "" && (got.RootDisk.Storage != want.RootDisk.Storage || got.RootDisk.StorageType != want.RootDisk.StorageType || got.RootDisk.Provisioning != want.RootDisk.Provisioning || got.RootDisk.VolumeGroup != want.RootDisk.VolumeGroup) {
+			return fmt.Errorf("VM %s root disk storage or provisioning change is not allowed", name)
+		}
 		if want.Kind == "vm" && got.StorageIdentityHash == want.StorageIdentityHash && got.BootstrapHash != "" && got.BootstrapHash != want.BootstrapHash {
 			return fmt.Errorf("VM %s bootstrap configuration is write-once; replace its template identity or run down", name)
 		}
@@ -614,27 +711,56 @@ func (a *App) validateExisting(ctx context.Context, old *state.Manifest, desired
 			}
 			// A write-ahead disk record may precede the atomic image creation.
 			// Materialization owns recreating that missing artifact.
-			if fileMissing(d.Path) {
+			var desiredDisk *state.Disk
+			if d.Name == "root" {
+				desiredDisk = want.RootDisk
+			} else {
+				for i := range want.AdditionalDisks {
+					if want.AdditionalDisks[i].Name == d.Name {
+						desiredDisk = &want.AdditionalDisks[i]
+					}
+				}
+			}
+			if desiredDisk != nil && d.Storage != "" && (d.Storage != desiredDisk.Storage || d.StorageType != desiredDisk.StorageType || d.VolumeGroup != desiredDisk.VolumeGroup) {
+				return fmt.Errorf("VM %s disk %s storage change is not allowed", name, d.Name)
+			}
+			exists, err := a.diskExists(ctx, d)
+			if err != nil {
+				return fmt.Errorf("inspect disk %s: %w", d.Name, err)
+			}
+			if !exists {
 				continue
 			}
-			info, err := a.Images.Info(ctx, d.Path)
-			if err != nil {
-				return fmt.Errorf("inspect disk %s: %w", d.Path, err)
+			actual := d.CapacityBytes
+			if d.StorageType == "file" || d.StorageType == "" {
+				info, e := a.Images.Info(ctx, d.Path)
+				if e != nil {
+					return fmt.Errorf("inspect disk %s: %w", d.Path, e)
+				}
+				actual = info.VirtualSize
+			} else {
+				lvs, e := a.LVM.LVs(ctx, d.VolumeGroup)
+				if e != nil {
+					return e
+				}
+				lv, _ := storagepkg.FindLV(lvs, d.LVName)
+				actual = lv.SizeBytes
 			}
-			if cap < info.VirtualSize {
-				return fmt.Errorf("refusing to shrink disk %s from %d to %d bytes", d.Name, info.VirtualSize, cap)
+			if cap < actual {
+				return fmt.Errorf("refusing to shrink disk %s from %d to %d bytes", d.Name, actual, cap)
 			}
 		}
 	}
 	return nil
 }
 
-func removeRecordedNode(layout state.Layout, name string, n *state.Node) error {
+func (a *App) removeRecordedNode(ctx context.Context, layout state.Layout, name string, n *state.Node, storages map[string]*state.Storage) error {
 	if n == nil {
 		return nil
 	}
 	manifest := state.NewManifest(layout.Topology)
 	manifest.Nodes[name] = n
+	manifest.Storages = storages
 	if err := validateManifestPaths(layout, manifest); err != nil {
 		return err
 	}
@@ -645,7 +771,7 @@ func removeRecordedNode(layout state.Layout, name string, n *state.Node) error {
 		return state.Disk{}
 	}()}, n.AdditionalDisks...) {
 		if d.Path != "" {
-			if err := os.Remove(d.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			if err := a.removeDisk(ctx, &d); err != nil {
 				return err
 			}
 		}
@@ -664,6 +790,18 @@ func (a *App) start(ctx context.Context, cfg *config.Config, layout state.Layout
 	if m == nil {
 		return errors.New("topology is not up")
 	}
+	vgLocks, err := a.planStorages(ctx, cfg, layout, m)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		for i := len(vgLocks) - 1; i >= 0; i-- {
+			_ = vgLocks[i].Close()
+		}
+	}()
+	if err := a.verifyManifestStorage(ctx, m, false); err != nil {
+		return err
+	}
 	netState := oldNetwork(m)
 	if netState == nil {
 		return errors.New("managed network is absent; run up")
@@ -674,6 +812,11 @@ func (a *App) start(ctx context.Context, cfg *config.Config, layout state.Layout
 	names, err := selectNodes(cfg, args)
 	if err != nil {
 		return err
+	}
+	for _, name := range names {
+		if err := a.verifyNodeDisks(ctx, m.Nodes[name]); err != nil {
+			return fmt.Errorf("verify node %s storage: %w", name, err)
+		}
 	}
 	for _, name := range names {
 		startErr := a.startNode(ctx, cfg, layout, m, name, m.Nodes[name], netState)
@@ -711,6 +854,18 @@ func (a *App) restart(ctx context.Context, cfg *config.Config, layout state.Layo
 	if m == nil {
 		return errors.New("topology is not up")
 	}
+	vgLocks, err := a.planStorages(ctx, cfg, layout, m)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		for i := len(vgLocks) - 1; i >= 0; i-- {
+			_ = vgLocks[i].Close()
+		}
+	}()
+	if err := a.verifyManifestStorage(ctx, m, false); err != nil {
+		return err
+	}
 	netState := oldNetwork(m)
 	if netState == nil {
 		return errors.New("managed network is absent; run up")
@@ -721,6 +876,11 @@ func (a *App) restart(ctx context.Context, cfg *config.Config, layout state.Layo
 	names, err := selectNodes(cfg, args)
 	if err != nil {
 		return err
+	}
+	for _, name := range names {
+		if err := a.verifyNodeDisks(ctx, m.Nodes[name]); err != nil {
+			return fmt.Errorf("verify node %s storage: %w", name, err)
+		}
 	}
 	for _, name := range names {
 		stopErr := a.stopNode(ctx, cfg.Name, name, m.Nodes[name])
@@ -816,6 +976,18 @@ func (a *App) down(ctx context.Context, cfg *config.Config, layout state.Layout,
 	if m == nil {
 		return nil
 	}
+	vgLocks, err := a.planStorages(ctx, cfg, layout, m)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		for i := len(vgLocks) - 1; i >= 0; i-- {
+			_ = vgLocks[i].Close()
+		}
+	}()
+	if err := a.verifyManifestStorage(ctx, m, true); err != nil {
+		return err
+	}
 	if err := verifyTopologyTree(layout, m); err != nil {
 		return err
 	}
@@ -837,8 +1009,20 @@ func (a *App) down(ctx context.Context, cfg *config.Config, layout state.Layout,
 		}
 	}
 	for name, n := range m.Nodes {
-		if err := removeRecordedNode(layout, name, n); err != nil {
+		if err := a.removeRecordedNode(ctx, layout, name, n, m.Storages); err != nil {
 			return err
+		}
+	}
+	storageNames := make([]string, 0, len(m.Storages))
+	for name := range m.Storages {
+		storageNames = append(storageNames, name)
+	}
+	slices.Sort(storageNames)
+	for _, name := range storageNames {
+		if s := m.Storages[name]; s != nil {
+			if err := a.removeStorage(ctx, cfg.Name, s); err != nil {
+				return err
+			}
 		}
 	}
 	for _, h := range m.Helpers {

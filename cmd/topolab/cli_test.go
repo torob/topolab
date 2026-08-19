@@ -113,7 +113,7 @@ func TestCLIRouterExecNestedParsingAndHelperOverrides(t *testing.T) {
 	}
 	runtime := &recordingRuntime{}
 	cli := CLI{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}, EUID: func() int { return 0 }, Runtime: runtime}
-	args := []string{"--file", file, "--working-dir", filepath.Join(dir, "work"), "--qemu-system", "/helpers/qemu", "router", "exec", "edge", "--user", "root", "--cwd", "/tmp", "--", "ip", "route", "show"}
+	args := []string{"--file", file, "--working-dir", filepath.Join(dir, "work"), "--qemu-system", "/helpers/qemu", "--lvm", "/helpers/lvm", "router", "exec", "edge", "--user", "root", "--cwd", "/tmp", "--", "ip", "route", "show"}
 	if code := cli.Execute(context.Background(), args); code != 0 {
 		t.Fatalf("exit %d", code)
 	}
@@ -122,6 +122,9 @@ func TestCLIRouterExecNestedParsingAndHelperOverrides(t *testing.T) {
 	}
 	if runtime.command.Helpers.QEMUSystem != "/helpers/qemu" {
 		t.Fatalf("helper override missing: %#v", runtime.command.Helpers)
+	}
+	if runtime.command.Helpers.LVM != "/helpers/lvm" {
+		t.Fatalf("LVM override missing: %#v", runtime.command.Helpers)
 	}
 }
 

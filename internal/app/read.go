@@ -66,6 +66,13 @@ func (a *App) psTable(ctx context.Context, cfg *config.Config, m *state.Manifest
 		}
 	}
 	fmt.Fprintln(a.Stdout, "NAME\tTYPE\tSTATE\tPID\tDETAILS")
+	for _, s := range a.psStorages(ctx, cfg, m) {
+		details := fmt.Sprintf("backend=%s provisioning=%s vg=%s vg_uuid=%s pool=%s pool_uuid=%s data=%.1f%% metadata=%.1f%% virtual_bytes=%d physical_bytes=%d overcommit=%t", s.Type, s.Provisioning, s.VolumeGroup, s.VGUUID, s.Pool, s.PoolUUID, s.DataPercent, s.MetadataPercent, s.VirtualCapacityBytes, s.PhysicalCapacityBytes, s.Overcommit)
+		if len(s.Warnings) > 0 {
+			details += " warnings=" + strings.Join(s.Warnings, ";")
+		}
+		fmt.Fprintf(a.Stdout, "%s\tstorage\t%s\t-\t%s\n", s.Name, s.State, details)
+	}
 	for _, name := range cfg.VMNames() {
 		n := m.Nodes[name]
 		status, pid, details := "stopped", 0, "network="+networkStatus
@@ -154,6 +161,25 @@ type psReport struct {
 	Nodes                    []psNode                    `json:"nodes"`
 	Namespaces               []psNamespace               `json:"namespaces"`
 	ManagementHostInterfaces []psManagementHostInterface `json:"management_host_interfaces"`
+	Storages                 []psStorage                 `json:"storages"`
+}
+
+type psStorage struct {
+	Name                  string   `json:"name"`
+	Type                  string   `json:"type"`
+	Provisioning          string   `json:"root_provisioning,omitempty"`
+	State                 string   `json:"state"`
+	DriftError            string   `json:"drift_error,omitempty"`
+	VolumeGroup           string   `json:"volume_group,omitempty"`
+	VGUUID                string   `json:"vg_uuid,omitempty"`
+	Pool                  string   `json:"pool,omitempty"`
+	PoolUUID              string   `json:"pool_uuid,omitempty"`
+	DataPercent           float64  `json:"data_percent,omitempty"`
+	MetadataPercent       float64  `json:"metadata_percent,omitempty"`
+	VirtualCapacityBytes  uint64   `json:"virtual_capacity_bytes,omitempty"`
+	PhysicalCapacityBytes uint64   `json:"physical_capacity_bytes,omitempty"`
+	Overcommit            bool     `json:"overcommit"`
+	Warnings              []string `json:"warnings"`
 }
 
 type psTopology struct {
@@ -227,7 +253,7 @@ type psManagementHostInterface struct {
 }
 
 func (a *App) psJSON(ctx context.Context, cfg *config.Config, m *state.Manifest) error {
-	report := psReport{SchemaVersion: 1, Topology: psTopology{Name: cfg.Name, psStatus: psStatus{State: "absent"}}, Network: psStatus{State: "absent"}, Nodes: []psNode{}, Namespaces: []psNamespace{}, ManagementHostInterfaces: []psManagementHostInterface{}}
+	report := psReport{SchemaVersion: 2, Topology: psTopology{Name: cfg.Name, psStatus: psStatus{State: "absent"}}, Network: psStatus{State: "absent"}, Nodes: []psNode{}, Namespaces: []psNamespace{}, ManagementHostInterfaces: []psManagementHostInterface{}, Storages: a.psStorages(ctx, cfg, m)}
 	var netState *network.State
 	if m != nil {
 		report.Topology.State = "active"

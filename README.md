@@ -41,8 +41,12 @@ and OVMF firmware at
 serves DHCP. TopoLab does not install or configure these host
 dependencies.
 
+An LVM topology additionally requires the LVM2 `lvm` command, a pre-existing
+VG with sufficient free extents, and device-mapper thin-pool support when any
+storage is `lvm-thin`. File-only topologies do not resolve or invoke LVM.
+
 VM helper locations may be selected with the global `--qemu-system`,
-`--qemu-img`, `--ovmf-code`, `--ovmf-vars`, and `--xorriso` flags. Executable
+`--qemu-img`, `--lvm`, `--ovmf-code`, `--ovmf-vars`, and `--xorriso` flags. Executable
 overrides must be executable regular files and firmware overrides must be
 readable regular files.
 
@@ -92,10 +96,45 @@ by default so tools such as `ip`, `nft`, and `tc` can administer that
 namespace; `--user` explicitly selects another local account. Management-host
 `exec` keeps its original-caller default described above.
 
-`ps --format json` emits the stable schema version 1 representation of topology
+`ps --format json` emits the stable schema version 2 representation of topology
 and network state, nodes, namespaces, management-host interfaces, QEMU PIDs and
 state, datapaths, balloon observations, guest-agent availability, and router
-external interfaces. Drift errors are separate fields rather than state text.
+external interfaces. It also reports storage/VG/pool identity, provisioning,
+thin utilization and overcommit, drift, and warnings. Drift errors are separate
+fields rather than state text.
+
+## Explicit storage backends
+
+Every root and additional disk names a top-level storage; there is no implicit,
+VM-level, or topology-default backend. File roots can be standalone copies or
+qcow2 snapshots. LVM disks are raw block devices in a supplied VG; TopoLab never
+creates or removes that VG or its PVs.
+
+```yaml
+storages:
+  - {name: snapshots, type: file, root_provisioning: snapshot}
+  - {name: copies, type: file, root_provisioning: copy}
+  - name: thin
+    type: lvm-thin
+    volume_group: lab-vg
+    pool_size_gib: 20
+    root_provisioning: snapshot
+  - {name: thick, type: lvm-thick, volume_group: lab-vg}
+
+vms:
+  - name: node
+    template: ubuntu
+    root_disk: {storage: thin, size_gib: 8}
+    additional_disks:
+      - {name: data, storage: thick, size_gib: 4}
+```
+
+`root_provisioning` is required and is `copy` or `snapshot` for `file` and
+`lvm-thin`. `lvm-thick` forbids it. `volume_group` is required only for LVM;
+`pool_size_gib` is required only for `lvm-thin`. Forbidden fields are rejected
+even when explicitly empty or zero. Storage/VG/provisioning changes, disk
+shrinks, and thin-pool reductions are rejected before mutation. Pools and disks
+may grow; thin utilization and overcommit are warnings rather than blockers.
 
 The former top-level `host` key is intentionally unsupported. Rename it to
 `management_host`; if the topology is active under the legacy root datapath,
@@ -125,6 +164,7 @@ sudo python3 e2e/network/test.py
 sudo python3 e2e/routed/test.py
 sudo python3 e2e/services/test.py
 sudo python3 e2e/vm-features/test.py
+sudo python3 e2e/storage/test.py
 ```
 
 The VM suites automatically download the official Ubuntu 26.04 amd64 cloud
@@ -135,6 +175,18 @@ the executable, or `TOPOLAB_E2E_KEEP=1` to retain a successful temporary run.
 Every failure retains its temporary directory and prints the location with
 diagnostics. The suites generate and export their own ephemeral SSH key, and
 the VM-features suite also generates its own ephemeral Root CA.
+
+The storage suite additionally requires LVM2, device mapper's `thin-pool`
+target, loop-device support, writable `/dev/mapper/control`, and at least 24 GiB
+available in its temporary filesystem. It creates exactly one sparse 24-GiB
+backing file, one verified loop PV, and a randomly named `tltest-*` VG. Its
+controlled 45-minute timeout preserves evidence on safety-check failure. It
+never scans for cleanup candidates. After an uncatchable termination, use the
+exact command printed by the suite, for example
+`sudo python3 e2e/storage/test.py --cleanup /tmp/tl-storage-.../fixture-state.json`.
+The recovery path revalidates backing-file, loop major/minor, PV UUID, VG UUID,
+and every registered LV before any destructive command. Run the suite twice for
+storage acceptance and confirm both runs leave no fixture resources.
 
 ## Examples
 

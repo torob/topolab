@@ -4,6 +4,10 @@ templates:
   - name: ubuntu-26.04
     path: "${TOPOLAB_TEMPLATE:?set TOPOLAB_TEMPLATE to an Ubuntu 26.04 amd64 cloud image}"
 
+storages:
+  - {name: snapshots, type: file, root_provisioning: snapshot}
+  - {name: copies, type: file, root_provisioning: copy}
+
 management_host:
   interfaces:
     - name: management
@@ -16,10 +20,10 @@ vms:
     cpu: {model: host, sockets: 1, cores: 4, threads: 1}
     memory_mb: 4096
     memory_balloon: {enabled: true, target_mb: 3072}
-    root_disk: {size_gib: 8, bus: scsi}
+    root_disk: {size_gib: 8, bus: scsi, storage: snapshots}
     additional_disks:
-      - {name: data, size_gib: 2, bus: virtio}
-      - {name: archive, size_gib: 1, bus: nvme}
+      - {name: data, size_gib: 2, bus: virtio, storage: copies}
+      - {name: archive, size_gib: 1, bus: nvme, storage: snapshots}
     guest_agent: true
     boot: {order: [disk, network], menu: true, strict: true}
     ssh_authorized_keys:
@@ -38,9 +42,9 @@ vms:
         model: e1000e
   - name: lifecycle
     template: ubuntu-26.04
-    root_disk: {bus: virtio}
+    root_disk: {bus: virtio, storage: copies}
     additional_disks:
-      - {name: state, size_gib: 1, bus: scsi}
+      - {name: state, size_gib: 1, bus: scsi, storage: snapshots}
     boot: {order: [network, disk]}
     ssh_authorized_keys:
       - "${TOPOLAB_SSH_PUBLIC_KEY:?set TOPOLAB_SSH_PUBLIC_KEY to an OpenSSH public key}"

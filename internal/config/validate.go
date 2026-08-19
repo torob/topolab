@@ -16,9 +16,18 @@ var (
 	resourceName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$`)
 	routerIface  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,14}$`)
 	leasePattern = regexp.MustCompile(`^[1-9][0-9]*[smhdw]$`)
+	lvmName      = regexp.MustCompile(`^[A-Za-z0-9_+][A-Za-z0-9_.+-]{0,126}$`)
 )
 
 func validateDecoded(c *Config) error {
+	for _, storage := range c.Storages {
+		if storage == nil {
+			continue
+		}
+		if err := validateStorageFields(storage); err != nil {
+			return err
+		}
+	}
 	for _, vm := range c.VMs {
 		name := vm.Name
 		if vm == nil {
@@ -43,12 +52,74 @@ func validateDecoded(c *Config) error {
 	return nil
 }
 
+func validateStorageFields(s *Storage) error {
+	prefix := fmt.Sprintf("storage %q", s.Name)
+	required := func(field, value string, _ bool) error {
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("%s field %q is required for type %q", prefix, field, s.Type)
+		}
+		return nil
+	}
+	forbidden := func(field string, set bool) error {
+		if set {
+			return fmt.Errorf("%s field %q is forbidden for type %q", prefix, field, s.Type)
+		}
+		return nil
+	}
+	switch s.Type {
+	case "file":
+		if err := required("root_provisioning", s.RootProvisioning, s.rootProvisioningSet); err != nil {
+			return err
+		}
+		if err := forbidden("volume_group", s.volumeGroupSet); err != nil {
+			return err
+		}
+		if err := forbidden("pool_size_gib", s.poolSizeGiBSet); err != nil {
+			return err
+		}
+	case "lvm-thin":
+		if err := required("volume_group", s.VolumeGroup, s.volumeGroupSet); err != nil {
+			return err
+		}
+		if !s.poolSizeGiBSet || s.PoolSizeGiB == 0 {
+			return fmt.Errorf("%s field %q must be positive for type %q", prefix, "pool_size_gib", s.Type)
+		}
+		if err := required("root_provisioning", s.RootProvisioning, s.rootProvisioningSet); err != nil {
+			return err
+		}
+	case "lvm-thick":
+		if err := required("volume_group", s.VolumeGroup, s.volumeGroupSet); err != nil {
+			return err
+		}
+		if err := forbidden("pool_size_gib", s.poolSizeGiBSet); err != nil {
+			return err
+		}
+		if err := forbidden("root_provisioning", s.rootProvisioningSet); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("%s has unsupported type %q (want file, lvm-thin, or lvm-thick)", prefix, s.Type)
+	}
+	if s.rootProvisioningSet && s.RootProvisioning != "copy" && s.RootProvisioning != "snapshot" {
+		return fmt.Errorf("%s field %q must be copy or snapshot for type %q", prefix, "root_provisioning", s.Type)
+	}
+	if (s.Type == "lvm-thin" || s.Type == "lvm-thick") && !lvmName.MatchString(s.VolumeGroup) {
+		return fmt.Errorf("%s field %q has invalid LVM name %q for type %q", prefix, "volume_group", s.VolumeGroup, s.Type)
+	}
+	return nil
+}
+
 func validate(c *Config) ([]string, error) {
 	if !resourceName.MatchString(c.Name) {
 		return nil, fmt.Errorf("name %q must match %s", c.Name, resourceName)
 	}
 	for _, template := range c.Templates {
 		if err := named("template", template.Name); err != nil {
+			return nil, err
+		}
+	}
+	for _, storage := range c.Storages {
+		if err := named("storage", storage.Name); err != nil {
 			return nil, err
 		}
 	}
@@ -148,6 +219,12 @@ func validateVM(c *Config, name string, vm *VM, macs map[string]string, ips map[
 	if err := validBus(vm.RootDisk.Bus); err != nil {
 		return fmt.Errorf("VM %q root_disk: %w", name, err)
 	}
+	if vm.RootDisk.Storage == "" {
+		return fmt.Errorf("VM %q root_disk.storage is required", name)
+	}
+	if _, ok := c.LookupStorage(vm.RootDisk.Storage); !ok {
+		return fmt.Errorf("VM %q root_disk references unknown storage %q", name, vm.RootDisk.Storage)
+	}
 	if vm.RootDisk.SizeGiB != nil && *vm.RootDisk.SizeGiB == 0 {
 		return fmt.Errorf("VM %q root disk size_gib must be positive", name)
 	}
@@ -158,6 +235,12 @@ func validateVM(c *Config, name string, vm *VM, macs map[string]string, ips map[
 		}
 		if d.SizeGiB == 0 {
 			return fmt.Errorf("VM %q disk %q size_gib must be positive", name, diskName)
+		}
+		if d.Storage == "" {
+			return fmt.Errorf("VM %q disk %q storage is required", name, diskName)
+		}
+		if _, ok := c.LookupStorage(d.Storage); !ok {
+			return fmt.Errorf("VM %q disk %q references unknown storage %q", name, diskName, d.Storage)
 		}
 		if err := validBus(d.Bus); err != nil {
 			return fmt.Errorf("VM %q disk %q: %w", name, diskName, err)

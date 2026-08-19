@@ -37,6 +37,24 @@ func TestBuildArgs(t *testing.T) {
 	}
 }
 
+func TestBuildUsesQCOW2ForFilesAndRawForLVM(t *testing.T) {
+	s := NodeSpec{Topology: "lab", Name: "vm", CPU: CPU{Model: "host", Sockets: 1, Cores: 1, Threads: 1}, Memory: Memory{MiB: 128}, Firmware: Firmware{Code: "c", Vars: "v"}, QMPPath: "q", PIDFile: "p", SerialSocket: "s", Disks: []DiskSpec{{Name: "file", Path: "/state/file.qcow2", Format: "qcow2"}, {Name: "lv", Path: "/dev/vg/lv", Format: "raw"}}}
+	args, err := NewBuilder("").Build(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "driver=qcow2,node-name=blk-disk-file") {
+		t.Fatalf("missing qcow2 node: %s", joined)
+	}
+	if !strings.Contains(joined, "driver=raw,node-name=blk-disk-lv") {
+		t.Fatalf("missing raw node: %s", joined)
+	}
+	if !strings.Contains(joined, "driver=file,node-name=file-disk-file-") || !strings.Contains(joined, "filename=/state/file.qcow2") || !strings.Contains(joined, "driver=host_device,node-name=file-disk-lv-") || !strings.Contains(joined, "filename=/dev/vg/lv") {
+		t.Fatalf("missing file/host-device protocol nodes: %s", joined)
+	}
+}
+
 func TestImageInfoAllowsReadOnlyInspectionOfLiveDisk(t *testing.T) {
 	manager := NewImageManager(runnerFunc(func(_ context.Context, name string, args ...string) ([]byte, error) {
 		if name != "qemu-img" || strings.Join(args, " ") != "info --force-share --output=json /live.qcow2" {
@@ -46,6 +64,36 @@ func TestImageInfoAllowsReadOnlyInspectionOfLiveDisk(t *testing.T) {
 	}), "")
 	if _, err := manager.Info(context.Background(), "/live.qcow2"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCreateCopyIsAtomicStandaloneQCOW2(t *testing.T) {
+	destination := t.TempDir() + "/copy.qcow2"
+	var commands []string
+	manager := NewImageManager(runnerFunc(func(_ context.Context, name string, args ...string) ([]byte, error) {
+		commands = append(commands, strings.Join(args, " "))
+		switch args[0] {
+		case "convert":
+			if err := os.WriteFile(args[len(args)-1], []byte("qcow"), 0o600); err != nil {
+				return nil, err
+			}
+			return nil, nil
+		case "info":
+			return []byte(`{"format":"qcow2","virtual-size":1073741824}`), nil
+		case "resize":
+			return nil, nil
+		}
+		return nil, nil
+	}), "qemu-img")
+	if err := manager.CreateCopy(context.Background(), destination, TemplateInfo{Path: "/template.qcow2", CapacityBytes: 1 << 30}, 2<<30); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(destination); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(commands, "\n")
+	if !strings.Contains(joined, "convert -f qcow2 -O qcow2 -S 4k /template.qcow2") || strings.Contains(joined, " -b ") {
+		t.Fatalf("copy commands = %s", joined)
 	}
 }
 
@@ -67,6 +115,21 @@ func TestBuildRejectsOverlongDiskSerial(t *testing.T) {
 	s := NodeSpec{Topology: "l", Name: "n", CPU: CPU{Model: "host", Sockets: 1, Cores: 1, Threads: 1}, Memory: Memory{MiB: 128}, Firmware: Firmware{Code: "c", Vars: "v"}, QMPPath: "q", PIDFile: "p", SerialSocket: "s", Disks: []DiskSpec{{Name: "root", Path: "/disk", Bus: "scsi", Serial: "123456789012345678901"}}}
 	if _, err := NewBuilder("").Build(s); err == nil || !strings.Contains(err.Error(), "20-character limit") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestBuildBoundsQEMUIdentifiersForLongDiskName(t *testing.T) {
+	s := NodeSpec{Topology: "l", Name: "n", CPU: CPU{Model: "host", Sockets: 1, Cores: 1, Threads: 1}, Memory: Memory{MiB: 128}, Firmware: Firmware{Code: "c", Vars: "v"}, QMPPath: "q", PIDFile: "p", SerialSocket: "s", Disks: []DiskSpec{{Name: "thick-offline", Path: "/disk", Bus: "scsi"}}}
+	args, err := NewBuilder("").Build(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, arg := range args {
+		for _, field := range strings.Split(arg, ",") {
+			if value, ok := strings.CutPrefix(field, "node-name="); ok && len(value) > 31 {
+				t.Fatalf("QEMU node name %q has %d bytes", value, len(value))
+			}
+		}
 	}
 }
 

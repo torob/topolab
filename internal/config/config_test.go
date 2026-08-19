@@ -264,9 +264,12 @@ func validVMDocument(t *testing.T, extra string) ([]byte, string) {
 templates:
   - name: base
     path: "${IMAGE:?image required}"
+storages:
+  - {name: local, type: file, root_provisioning: snapshot}
 vms:
   - name: vm
     template: base
+    root_disk: {storage: local}
     ssh_authorized_keys:
       - "${KEY:?key required}"
     interfaces:
@@ -326,13 +329,15 @@ func TestAdditionalDiskAndInterfaceOrderPreserved(t *testing.T) {
 	}
 	doc := `name: order
 templates: [{name: base, path: ` + template + `}]
+storages: [{name: local, type: file, root_provisioning: snapshot}]
 vms:
   - name: vm
     template: base
+    root_disk: {storage: local}
     ssh_authorized_keys: ["` + testKey(t) + `"]
     additional_disks:
-      - {name: zed, size_gib: 1}
-      - {name: alpha, size_gib: 2}
+      - {name: zed, size_gib: 1, storage: local}
+      - {name: alpha, size_gib: 2, storage: local}
     interfaces:
       - {name: zif}
       - {name: aif}
@@ -355,6 +360,79 @@ links:
 	}
 	if strings.Index(s, "name: zif") > strings.Index(s, "name: aif") {
 		t.Fatalf("interface order changed:\n%s", s)
+	}
+}
+
+func TestStorageTypeSpecificFieldPresenceValidation(t *testing.T) {
+	base := func(storage string) string {
+		return "name: storage-fields\nstorages:\n  - " + storage + "\nrouters:\n  - name: edge\n    interfaces:\n      - name: wan\n        external: {sources: [10.0.0.0/24]}\n"
+	}
+	tests := []struct{ name, storage, want string }{
+		{"file valid snapshot", "{name: files, type: file, root_provisioning: snapshot}", ""},
+		{"file valid copy", "{name: files, type: file, root_provisioning: copy}", ""},
+		{"file missing provisioning", "{name: files, type: file}", `field "root_provisioning" is required for type "file"`},
+		{"file empty provisioning", "{name: files, type: file, root_provisioning: ''}", `field "root_provisioning" is required for type "file"`},
+		{"file empty VG forbidden", "{name: files, type: file, root_provisioning: copy, volume_group: ''}", `field "volume_group" is forbidden for type "file"`},
+		{"file zero pool forbidden", "{name: files, type: file, root_provisioning: copy, pool_size_gib: 0}", `field "pool_size_gib" is forbidden for type "file"`},
+		{"thin valid", "{name: thin, type: lvm-thin, volume_group: vg, pool_size_gib: 4, root_provisioning: snapshot}", ""},
+		{"thin missing VG", "{name: thin, type: lvm-thin, pool_size_gib: 4, root_provisioning: copy}", `field "volume_group" is required for type "lvm-thin"`},
+		{"thin empty VG", "{name: thin, type: lvm-thin, volume_group: '', pool_size_gib: 4, root_provisioning: copy}", `field "volume_group" is required for type "lvm-thin"`},
+		{"thin missing pool", "{name: thin, type: lvm-thin, volume_group: vg, root_provisioning: copy}", `field "pool_size_gib" must be positive for type "lvm-thin"`},
+		{"thin zero pool", "{name: thin, type: lvm-thin, volume_group: vg, pool_size_gib: 0, root_provisioning: copy}", `field "pool_size_gib" must be positive for type "lvm-thin"`},
+		{"thin bad provisioning", "{name: thin, type: lvm-thin, volume_group: vg, pool_size_gib: 4, root_provisioning: reflink}", `must be copy or snapshot for type "lvm-thin"`},
+		{"thick valid", "{name: thick, type: lvm-thick, volume_group: vg}", ""},
+		{"thick empty VG", "{name: thick, type: lvm-thick, volume_group: ''}", `field "volume_group" is required for type "lvm-thick"`},
+		{"thick zero pool forbidden", "{name: thick, type: lvm-thick, volume_group: vg, pool_size_gib: 0}", `field "pool_size_gib" is forbidden for type "lvm-thick"`},
+		{"thick empty provisioning forbidden", "{name: thick, type: lvm-thick, volume_group: vg, root_provisioning: ''}", `field "root_provisioning" is forbidden for type "lvm-thick"`},
+		{"unsupported", "{name: bad, type: directory}", `unsupported type "directory"`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, _, err := Parse([]byte(base(test.storage)), t.TempDir(), nil)
+			if test.want == "" && err != nil {
+				t.Fatal(err)
+			}
+			if test.want != "" && (err == nil || !strings.Contains(err.Error(), test.want)) {
+				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestEveryDiskRequiresKnownStorage(t *testing.T) {
+	doc, template := validVMDocument(t, "")
+	lookup := func(name string) (string, bool) {
+		if name == "IMAGE" {
+			return template, true
+		}
+		if name == "KEY" {
+			return testKey(t), true
+		}
+		return "", false
+	}
+	for _, test := range []struct{ name, old, new, want string }{
+		{"root missing", "root_disk: {storage: local}", "root_disk: {}", "root_disk.storage is required"},
+		{"root unknown", "root_disk: {storage: local}", "root_disk: {storage: missing}", `root_disk references unknown storage "missing"`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			changed := strings.Replace(string(doc), test.old, test.new, 1)
+			_, _, err := Parse([]byte(changed), t.TempDir(), lookup)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+	for _, test := range []struct{ name, disk, want string }{
+		{"additional missing", "{name: data, size_gib: 1}", `disk "data" storage is required`},
+		{"additional unknown", "{name: data, size_gib: 1, storage: missing}", `disk "data" references unknown storage "missing"`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			changed := strings.Replace(string(doc), "    interfaces:\n", "    additional_disks: ["+test.disk+"]\n    interfaces:\n", 1)
+			_, _, err := Parse([]byte(changed), t.TempDir(), lookup)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v", err)
+			}
+		})
 	}
 }
 

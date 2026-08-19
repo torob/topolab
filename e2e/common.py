@@ -250,7 +250,14 @@ class Harness:
     """Own one disposable topology run and preserve its evidence on failure."""
 
     def __init__(
-        self, name: str, *, template: bool = False, required_tools: Iterable[str] = ()
+        self,
+        name: str,
+        *,
+        template: bool = False,
+        required_tools: Iterable[str] = (),
+        generated_topology: str | None = None,
+        external_cleanup: Callable[["Harness", bool], None] | None = None,
+        test_directory: Path | None = None,
     ) -> None:
         self.name = name
         self.repository = REPOSITORY
@@ -258,11 +265,16 @@ class Harness:
         # Runtime paths include several nested components and Unix sockets are
         # limited to 107 bytes on Linux. Keep the disposable root deliberately
         # short so suites with longer topology and node names remain portable.
-        self.test_dir = Path(tempfile.mkdtemp(prefix=f"tl-{name}-"))
+        self._owns_test_dir = test_directory is None
+        self.test_dir = Path(tempfile.mkdtemp(prefix=f"tl-{name}-")) if test_directory is None else test_directory.resolve()
+        self.test_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.working_dir = self.test_dir / "work"
         self.working_dir.mkdir(mode=0o700)
         self.topology = self.test_dir / "topology.yml"
-        shutil.copyfile(self.example, self.topology)
+        if generated_topology is None:
+            shutil.copyfile(self.example, self.topology)
+        else:
+            self.topology.write_text(generated_topology, encoding="utf-8")
         self.log_path = self.test_dir / "commands.log"
         self.environment = os.environ.copy()
         binary = os.environ.get("TOPOLAB_BINARY", str(REPOSITORY / "bin" / "topolab"))
@@ -270,13 +282,15 @@ class Harness:
         self.key: Path | None = None
         self.background: list[subprocess.Popen[str]] = []
         self._finished = False
+        self.external_cleanup = external_cleanup
         try:
             self._preflight(required_tools)
             if template:
                 self.environment["TOPOLAB_TEMPLATE"] = str(cached_template())
                 self._make_key()
         except BaseException:
-            shutil.rmtree(self.test_dir, ignore_errors=True)
+            if self._owns_test_dir:
+                shutil.rmtree(self.test_dir, ignore_errors=True)
             raise
 
     def _preflight(self, required_tools: Iterable[str]) -> None:
@@ -556,6 +570,8 @@ class Harness:
             self.diagnostics()
         with contextlib.suppress(Exception):
             self.run("down", check=False, timeout=120)
+        if self.external_cleanup is not None:
+            self.external_cleanup(self, success)
         keep = os.environ.get("TOPOLAB_E2E_KEEP") == "1" or not success
         if keep:
             reason = "requested" if success else "test failed"
@@ -572,10 +588,20 @@ def run_suite(
     *,
     template: bool = False,
     required_tools: Iterable[str] = (),
+    generated_topology: str | None = None,
+    external_cleanup: Callable[[Harness, bool], None] | None = None,
+    test_directory: Path | None = None,
 ) -> None:
     harness: Harness | None = None
     try:
-        harness = Harness(name, template=template, required_tools=required_tools)
+        harness = Harness(
+            name,
+            template=template,
+            required_tools=required_tools,
+            generated_topology=generated_topology,
+            external_cleanup=external_cleanup,
+            test_directory=test_directory,
+        )
         body(harness)
     except BaseException as error:
         if harness:

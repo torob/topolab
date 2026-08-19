@@ -1,16 +1,82 @@
 package config
 
-// Config is the normalized v1 topology document. Named collections are ordered
+import (
+	"fmt"
+
+	"gopkg.in/yaml.v3"
+)
+
+// Config is the normalized v2 topology document. Named collections are ordered
 // slices; index is a disposable lookup accelerator built after decoding.
 type Config struct {
 	Name           string         `yaml:"name"`
 	Templates      []*Template    `yaml:"templates"`
+	Storages       []*Storage     `yaml:"storages"`
 	ManagementHost ManagementHost `yaml:"management_host"`
 	VMs            []*VM          `yaml:"vms"`
 	Routers        []*Router      `yaml:"routers"`
 	Switches       []*Switch      `yaml:"switches"`
 	Links          []*Link        `yaml:"links"`
 	index          *configIndex
+}
+
+// Storage is an explicitly selected disk backend. The private presence bits
+// deliberately distinguish an omitted field from an explicitly supplied
+// empty/zero field so type-specific validation never silently ignores input.
+type Storage struct {
+	Name             string `yaml:"name"`
+	Type             string `yaml:"type"`
+	VolumeGroup      string `yaml:"volume_group,omitempty"`
+	PoolSizeGiB      uint64 `yaml:"pool_size_gib,omitempty"`
+	RootProvisioning string `yaml:"root_provisioning,omitempty"`
+
+	volumeGroupSet      bool
+	poolSizeGiBSet      bool
+	rootProvisioningSet bool
+}
+
+func (s *Storage) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind != yaml.MappingNode {
+		return fmt.Errorf("storage must be a mapping")
+	}
+	allowed := map[string]bool{"name": true, "type": true, "volume_group": true, "pool_size_gib": true, "root_provisioning": true}
+	seen := map[string]bool{}
+	for i := 0; i < len(node.Content); i += 2 {
+		key := node.Content[i].Value
+		if !allowed[key] {
+			return fmt.Errorf("field %s not found in type config.Storage", key)
+		}
+		if seen[key] {
+			return fmt.Errorf("storage field %q is duplicated", key)
+		}
+		seen[key] = true
+		switch key {
+		case "name":
+			if err := node.Content[i+1].Decode(&s.Name); err != nil {
+				return err
+			}
+		case "type":
+			if err := node.Content[i+1].Decode(&s.Type); err != nil {
+				return err
+			}
+		case "volume_group":
+			s.volumeGroupSet = true
+			if err := node.Content[i+1].Decode(&s.VolumeGroup); err != nil {
+				return err
+			}
+		case "pool_size_gib":
+			s.poolSizeGiBSet = true
+			if err := node.Content[i+1].Decode(&s.PoolSizeGiB); err != nil {
+				return err
+			}
+		case "root_provisioning":
+			s.rootProvisioningSet = true
+			if err := node.Content[i+1].Decode(&s.RootProvisioning); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 type Template struct {
@@ -70,12 +136,14 @@ type MemoryBalloon struct {
 type RootDisk struct {
 	SizeGiB *uint64 `yaml:"size_gib,omitempty"`
 	Bus     string  `yaml:"bus"`
+	Storage string  `yaml:"storage"`
 }
 
 type Disk struct {
 	Name    string `yaml:"name"`
 	SizeGiB uint64 `yaml:"size_gib"`
 	Bus     string `yaml:"bus"`
+	Storage string `yaml:"storage"`
 }
 
 type Boot struct {

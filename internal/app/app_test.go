@@ -35,6 +35,18 @@ func TestDownWithoutStateDoesNotCreateWorkingDirectory(t *testing.T) {
 	}
 }
 
+func TestStorageOnlyCheckpointIsNotTreatedAsLegacyDatapath(t *testing.T) {
+	partial := state.NewManifest("lab")
+	partial.Storages["thin"] = &state.Storage{Name: "thin", Type: "lvm-thin", Pending: "create-pool"}
+	if requiresLegacyDatapathDown(partial) {
+		t.Fatal("storage-only write-ahead checkpoint was classified as an active legacy datapath")
+	}
+	partial.DatapathVersion = 1
+	if !requiresLegacyDatapathDown(partial) {
+		t.Fatal("active legacy datapath was not classified for down-first migration")
+	}
+}
+
 type fakeProcesses struct {
 	alive   map[int]bool
 	args    map[int][]string
@@ -460,7 +472,7 @@ func TestPSJSONReportsStableTypedState(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
 		t.Fatalf("decode JSON: %v\n%s", err, out.String())
 	}
-	if report.SchemaVersion != 1 || report.Topology.State != "active" || report.Network.State != "ready" {
+	if report.SchemaVersion != 2 || report.Topology.State != "active" || report.Network.State != "ready" {
 		t.Fatalf("status = %#v", report)
 	}
 	if len(report.Nodes) != 2 || report.Nodes[0].QEMU == nil || report.Nodes[0].QEMU.State != "stopped" || len(report.Nodes[0].Datapaths) != 1 || report.Nodes[0].Balloon == nil || report.Nodes[0].GuestAgent == nil {
@@ -507,6 +519,25 @@ func TestPSJSONAbsentAndDriftKeepErrorsOutOfState(t *testing.T) {
 	}
 	if drift.Network.State != "drift" || drift.Network.DriftError != "wrong ownership" || strings.Contains(drift.Network.State, "wrong ownership") {
 		t.Fatalf("drift report = %#v", drift)
+	}
+}
+
+func TestPSJSONIncludesExplicitStorageState(t *testing.T) {
+	cfg := &config.Config{Name: "lab", Storages: []*config.Storage{{Name: "files", Type: "file", RootProvisioning: "copy"}}, Routers: []*config.Router{{Name: "edge"}}}
+	m := state.NewManifest("lab")
+	m.Storages["files"] = &state.Storage{Name: "files", Type: "file", RootProvisioning: "copy", Warnings: []string{"example warning"}}
+	var out bytes.Buffer
+	a := New(&out, nil)
+	a.defaults()
+	if err := a.ps(context.Background(), cfg, m, []string{"--format", "json"}); err != nil {
+		t.Fatal(err)
+	}
+	var report psReport
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.SchemaVersion != 2 || len(report.Storages) != 1 || report.Storages[0].State != "ready" || report.Storages[0].Provisioning != "copy" || len(report.Storages[0].Warnings) != 1 {
+		t.Fatalf("storage status = %#v", report.Storages)
 	}
 }
 

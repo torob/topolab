@@ -14,6 +14,7 @@ import (
 	"github.com/torob/topolab/internal/network"
 	"github.com/torob/topolab/internal/qemu"
 	"github.com/torob/topolab/internal/state"
+	storagepkg "github.com/torob/topolab/internal/storage"
 )
 
 type bootstrapSnapshot struct {
@@ -27,7 +28,11 @@ func (a *App) desiredNodes(cfg *config.Config, layout state.Layout, templates ma
 	for _, vm := range cfg.VMs {
 		name, tmpl := vm.Name, templates[vm.Template]
 		dir, _ := layout.NodeDir(name)
-		storage, _ := state.Hash(struct{ Path, Digest string }{tmpl.Path, tmpl.Digest})
+		rootStorage, _ := cfg.LookupStorage(vm.RootDisk.Storage)
+		if rootStorage == nil {
+			rootStorage = &config.Storage{Name: vm.RootDisk.Storage, Type: "file", RootProvisioning: "snapshot"}
+		}
+		storage, _ := state.Hash(struct{ Path, Digest, Storage, Type, Provisioning string }{tmpl.Path, tmpl.Digest, rootStorage.Name, rootStorage.Type, rootStorage.RootProvisioning})
 		snapshot := bootstrapSnapshot{AuthorizedKeys: append([]string(nil), vm.SSHAuthorizedKeys...), Network: vmCloudNetwork(cfg, name, vm), RootCACertificates: vmRootCACertificates(vm)}
 		bootstrap, _ := state.Hash(snapshot)
 		restart, _ := state.Hash(vmRestartSnapshot(cfg, name, vm))
@@ -43,8 +48,12 @@ func (a *App) desiredNodes(cfg *config.Config, layout state.Layout, templates ma
 				return nil, fmt.Errorf("VM %s root disk capacity %d is smaller than template capacity %d", name, rootCapacity, tmpl.CapacityBytes)
 			}
 		}
+		rootPath := filepath.Join(dir, "root.qcow2")
+		if rootStorage.Type != "file" {
+			rootPath = storagepkg.DevicePath(rootStorage.VolumeGroup, storagepkg.DiskName(cfg.Name, name, "root"))
+		}
 		n := &state.Node{Kind: "vm", StorageIdentityHash: storage, RestartHash: restart, BootstrapHash: bootstrap, BootstrapSnapshot: raw, TemplatePath: tmpl.Path, TemplateDigest: tmpl.Digest,
-			RootDisk: diskRecord("root", filepath.Join(dir, "root.qcow2"), vm.RootDisk.Bus, rootCapacity), SeedPath: filepath.Join(dir, "seed.iso"), OVMFVarsPath: filepath.Join(dir, "OVMF_VARS.fd"), PIDFile: filepath.Join(dir, "qemu.pid"), SerialLogPath: filepath.Join(layout.LogsDir, name+".jsonl")}
+			RootDisk: diskRecord("root", rootPath, vm.RootDisk.Bus, rootCapacity, rootStorage, true, cfg.Name, name), SeedPath: filepath.Join(dir, "seed.iso"), OVMFVarsPath: filepath.Join(dir, "OVMF_VARS.fd"), PIDFile: filepath.Join(dir, "qemu.pid"), SerialLogPath: filepath.Join(layout.LogsDir, name+".jsonl")}
 		n.QMPPath, _ = layout.SocketPath(name, "qmp")
 		n.SerialSocketPath, _ = layout.SocketPath(name, "serial")
 		if vm.GuestAgent {
@@ -60,16 +69,43 @@ func (a *App) desiredNodes(cfg *config.Config, layout state.Layout, templates ma
 			if err != nil {
 				return nil, err
 			}
-			n.AdditionalDisks = append(n.AdditionalDisks, *diskRecord(dn, filepath.Join(dir, "disk-"+state.ShortID(dn, 12)+".qcow2"), d.Bus, size))
+			backend, _ := cfg.LookupStorage(d.Storage)
+			if backend == nil {
+				backend = &config.Storage{Name: d.Storage, Type: "file", RootProvisioning: "snapshot"}
+			}
+			path := filepath.Join(dir, "disk-"+state.ShortID(dn, 12)+".qcow2")
+			if backend.Type != "file" {
+				path = storagepkg.DevicePath(backend.VolumeGroup, storagepkg.DiskName(cfg.Name, name, dn))
+			}
+			n.AdditionalDisks = append(n.AdditionalDisks, *diskRecord(dn, path, d.Bus, size, backend, false, cfg.Name, name))
 		}
 		out[name] = n
 	}
 	return out, nil
 }
 
-func diskRecord(name, path, bus string, capacity uint64) *state.Disk {
+func diskRecord(name, path, bus string, capacity uint64, options ...any) *state.Disk {
 	id := qemu.ID("disk", name)
-	return &state.Disk{Name: name, Path: path, Bus: bus, CapacityBytes: capacity, BlockNode: "blk-" + id, Serial: qemu.DiskSerial(name)}
+	d := &state.Disk{Name: name, Path: path, Bus: bus, CapacityBytes: capacity, BlockNode: "blk-" + id, Serial: qemu.DiskSerial(name), Format: "qcow2"}
+	if len(options) == 0 {
+		return d
+	}
+	storage := options[0].(*config.Storage)
+	root := options[1].(bool)
+	topology := options[2].(string)
+	node := options[3].(string)
+	d.Storage, d.StorageType = storage.Name, storage.Type
+	if root {
+		d.Provisioning = storage.RootProvisioning
+	}
+	if storage.Type != "file" {
+		d.Format, d.VolumeGroup, d.LVName = "raw", storage.VolumeGroup, storagepkg.DiskName(topology, node, name)
+		d.OwnershipTags = storagepkg.Tags(topology, storage.Name, "disk")
+		if storage.Type == "lvm-thin" {
+			d.PoolName = storagepkg.PoolName(topology, storage.Name)
+		}
+	}
+	return d
 }
 
 // validateNodePlans exhausts deterministic QEMU allocation and argument
@@ -138,6 +174,11 @@ func (a *App) materializeNodes(ctx context.Context, cfg *config.Config, layout s
 	}
 	for _, name := range cfg.VMNames() {
 		want, old := desired[name], m.Nodes[name]
+		rootDesired := want.RootDisk.CapacityBytes
+		diskDesired := map[string]uint64{}
+		for _, d := range want.AdditionalDisks {
+			diskDesired[d.Name] = d.CapacityBytes
+		}
 		if old == nil {
 			old = &state.Node{}
 		}
@@ -148,8 +189,11 @@ func (a *App) materializeNodes(ctx context.Context, cfg *config.Config, layout s
 			existing[d.Name] = d
 		}
 		if !storageNew && old.RootDisk != nil {
-			if old.RootDisk.Path != "" {
-				want.RootDisk.Path = old.RootDisk.Path
+			bus, block, serial := want.RootDisk.Bus, want.RootDisk.BlockNode, want.RootDisk.Serial
+			*want.RootDisk = *old.RootDisk
+			want.RootDisk.Bus, want.RootDisk.BlockNode, want.RootDisk.Serial = bus, block, serial
+			if rootDesired > want.RootDisk.CapacityBytes {
+				want.RootDisk.Pending = "resize"
 			}
 			if old.OVMFVarsPath != "" {
 				want.OVMFVarsPath = old.OVMFVarsPath
@@ -160,8 +204,11 @@ func (a *App) materializeNodes(ctx context.Context, cfg *config.Config, layout s
 		}
 		for i := range want.AdditionalDisks {
 			if have, ok := existing[want.AdditionalDisks[i].Name]; ok {
-				if have.Path != "" {
-					want.AdditionalDisks[i].Path = have.Path
+				bus, block, serial := want.AdditionalDisks[i].Bus, want.AdditionalDisks[i].BlockNode, want.AdditionalDisks[i].Serial
+				want.AdditionalDisks[i] = have
+				want.AdditionalDisks[i].Bus, want.AdditionalDisks[i].BlockNode, want.AdditionalDisks[i].Serial = bus, block, serial
+				if diskDesired[want.AdditionalDisks[i].Name] > want.AdditionalDisks[i].CapacityBytes {
+					want.AdditionalDisks[i].Pending = "resize"
 				}
 			}
 		}
@@ -179,8 +226,11 @@ func (a *App) materializeNodes(ctx context.Context, cfg *config.Config, layout s
 			return err
 		}
 
-		if fileMissing(want.RootDisk.Path) {
-			if err := a.Images.CreateOverlay(ctx, want.RootDisk.Path, qemu.TemplateInfo{Path: want.TemplatePath, Digest: want.TemplateDigest, CapacityBytes: templates[templateName(cfg, name)].CapacityBytes}, want.RootDisk.CapacityBytes); err != nil {
+		rootTemplate := qemu.TemplateInfo{Path: want.TemplatePath, Digest: want.TemplateDigest, CapacityBytes: templates[templateName(cfg, name)].CapacityBytes}
+		if exists, err := a.diskExists(ctx, want.RootDisk); err != nil {
+			return err
+		} else if !exists || (want.RootDisk.Pending != "" && want.RootDisk.Pending != "resize") {
+			if err := a.createDisk(ctx, cfg, layout, m, name, want, want.RootDisk, rootTemplate, true); err != nil {
 				return fmt.Errorf("create %s root disk: %w", name, err)
 			}
 			if err := state.Save(layout.ManifestPath, m); err != nil {
@@ -196,7 +246,7 @@ func (a *App) materializeNodes(ctx context.Context, cfg *config.Config, layout s
 			}
 		}
 		if !storageNew && old.RootDisk != nil {
-			if err := a.growDisk(ctx, old, old.RootDisk, want.RootDisk.CapacityBytes); err != nil {
+			if err := a.growDisk(ctx, want, want.RootDisk, rootDesired); err != nil {
 				return err
 			}
 			if err := state.Save(layout.ManifestPath, m); err != nil {
@@ -205,16 +255,14 @@ func (a *App) materializeNodes(ctx context.Context, cfg *config.Config, layout s
 		}
 		for i := range want.AdditionalDisks {
 			d := &want.AdditionalDisks[i]
-			if fileMissing(d.Path) {
-				if err := a.Images.CreateDataDisk(ctx, d.Path, d.CapacityBytes); err != nil {
+			if exists, err := a.diskExists(ctx, d); err != nil {
+				return err
+			} else if !exists || (d.Pending != "" && d.Pending != "resize") {
+				if err := a.createDisk(ctx, cfg, layout, m, name, want, d, qemu.TemplateInfo{}, false); err != nil {
 					return fmt.Errorf("create %s disk %s: %w", name, d.Name, err)
 				}
 			} else {
-				have := *d
-				if prior, ok := existing[d.Name]; ok {
-					have = prior
-				}
-				if err := a.growDisk(ctx, old, &have, d.CapacityBytes); err != nil {
+				if err := a.growDisk(ctx, want, d, diskDesired[d.Name]); err != nil {
 					return err
 				}
 			}
@@ -247,20 +295,92 @@ func (a *App) materializeNodes(ctx context.Context, cfg *config.Config, layout s
 }
 
 func (a *App) growDisk(ctx context.Context, node *state.Node, disk *state.Disk, desired uint64) error {
-	info, err := a.Images.Info(ctx, disk.Path)
-	if err != nil {
-		return err
+	actual := disk.CapacityBytes
+	if disk.StorageType == "file" || disk.StorageType == "" {
+		info, err := a.Images.Info(ctx, disk.Path)
+		if err != nil {
+			return err
+		}
+		actual = info.VirtualSize
+	} else {
+		lvs, err := a.LVM.LVs(ctx, disk.VolumeGroup)
+		if err != nil {
+			return err
+		}
+		lv, ok := storagepkg.FindLV(lvs, disk.LVName)
+		if !ok {
+			return fmt.Errorf("disk LV %s is absent", disk.LVName)
+		}
+		actual = lv.SizeBytes
 	}
-	growth := qemu.Growth{Path: disk.Path, BlockNode: disk.BlockNode, Actual: info.VirtualSize, Desired: desired}
-	if desired == info.VirtualSize {
+	if desired < actual {
+		return fmt.Errorf("refusing disk shrink from %d to %d bytes", actual, desired)
+	}
+	if desired == actual {
+		if disk.Pending == "resize" && node.PID > 0 && a.Processes.Alive(node.PID) {
+			client := a.OpenQMP(node.QMPPath)
+			defer client.Close()
+			if err := client.BlockResize(ctx, disk.BlockNode, desired); err != nil {
+				return err
+			}
+		}
+		disk.CapacityBytes = desired
+		if disk.Pending == "resize" {
+			disk.Pending = ""
+		}
 		return nil
 	}
+	if disk.StorageType != "file" && disk.StorageType != "" {
+		if exists, err := a.diskExists(ctx, disk); err != nil {
+			return err
+		} else if !exists {
+			return fmt.Errorf("disk LV %s is absent", disk.LVName)
+		}
+		if disk.StorageType == "lvm-thick" {
+			vg, err := a.LVM.LookupVG(ctx, disk.VolumeGroup)
+			if err != nil {
+				return err
+			}
+			if vg.UUID != disk.VGUUID || desired-actual > vg.FreeBytes {
+				return fmt.Errorf("thick disk %s failed VG identity/capacity revalidation", disk.Name)
+			}
+		}
+		if err := a.LVM.Extend(ctx, disk.VolumeGroup, disk.LVName, desired); err != nil {
+			return err
+		}
+		lvs, err := a.LVM.LVs(ctx, disk.VolumeGroup)
+		if err != nil {
+			return err
+		}
+		lv, ok := storagepkg.FindLV(lvs, disk.LVName)
+		if !ok || lv.SizeBytes < desired {
+			return fmt.Errorf("LV resize verification failed for %s", disk.LVName)
+		}
+		if node.PID > 0 && a.Processes.Alive(node.PID) {
+			client := a.OpenQMP(node.QMPPath)
+			defer client.Close()
+			if err := client.BlockResize(ctx, disk.BlockNode, desired); err != nil {
+				return err
+			}
+		}
+		disk.CapacityBytes, disk.Pending = desired, ""
+		return nil
+	}
+	growth := qemu.Growth{Path: disk.Path, BlockNode: disk.BlockNode, Actual: actual, Desired: desired}
 	if node.PID > 0 && a.Processes.Alive(node.PID) {
 		client := a.OpenQMP(node.QMPPath)
 		defer client.Close()
-		return a.Images.ResizeOnline(ctx, client, growth)
+		if err := a.Images.ResizeOnline(ctx, client, growth); err != nil {
+			return err
+		}
+		disk.CapacityBytes, disk.Pending = desired, ""
+		return nil
 	}
-	return a.Images.ResizeOffline(ctx, growth)
+	if err := a.Images.ResizeOffline(ctx, growth); err != nil {
+		return err
+	}
+	disk.CapacityBytes, disk.Pending = desired, ""
+	return nil
 }
 
 func templateName(cfg *config.Config, node string) string {
@@ -319,6 +439,9 @@ func (a *App) startNode(ctx context.Context, cfg *config.Config, layout state.La
 			}
 		}
 		return nil
+	}
+	if err := a.activateNodeDisks(ctx, n); err != nil {
+		return fmt.Errorf("activate node %s disks: %w", name, err)
 	}
 	checkpoint := func() error { return state.Save(layout.ManifestPath, manifest) }
 	if err := a.startCollector(name, cfg.Name, n, checkpoint); err != nil {
@@ -477,9 +600,9 @@ func (a *App) qemuSpec(cfg *config.Config, name string, n *state.Node, netState 
 		}
 		s.NICs = append(s.NICs, qemu.NICSpec{Name: in, Model: v.Model, MAC: v.MAC, TAP: tap.Name, Queues: v.Queues})
 	}
-	s.Disks = append(s.Disks, qemu.DiskSpec{Name: "root", Path: n.RootDisk.Path, Bus: n.RootDisk.Bus, BlockNode: n.RootDisk.BlockNode, Serial: n.RootDisk.Serial, Boot: true})
+	s.Disks = append(s.Disks, qemu.DiskSpec{Name: "root", Path: n.RootDisk.Path, Bus: n.RootDisk.Bus, BlockNode: n.RootDisk.BlockNode, Serial: n.RootDisk.Serial, Format: n.RootDisk.Format, Boot: true})
 	for _, d := range n.AdditionalDisks {
-		s.Disks = append(s.Disks, qemu.DiskSpec{Name: d.Name, Path: d.Path, Bus: d.Bus, BlockNode: d.BlockNode, Serial: d.Serial})
+		s.Disks = append(s.Disks, qemu.DiskSpec{Name: d.Name, Path: d.Path, Bus: d.Bus, BlockNode: d.BlockNode, Serial: d.Serial, Format: d.Format})
 	}
 	return s, nil
 }

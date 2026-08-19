@@ -28,6 +28,7 @@ func documentMapping(n *yaml.Node) *yaml.Node {
 
 type configIndex struct {
 	templates                map[string]*Template
+	storages                 map[string]*Storage
 	managementHostInterfaces map[string]*ManagementHostInterface
 	vms                      map[string]*VM
 	vmDisks                  map[string]map[string]*Disk
@@ -42,12 +43,15 @@ type configIndex struct {
 
 func buildIndexes(c *Config) error {
 	idx := &configIndex{
-		templates: map[string]*Template{}, managementHostInterfaces: map[string]*ManagementHostInterface{},
+		templates: map[string]*Template{}, storages: map[string]*Storage{}, managementHostInterfaces: map[string]*ManagementHostInterface{},
 		vms: map[string]*VM{}, vmDisks: map[string]map[string]*Disk{}, vmInterfaces: map[string]map[string]*VMInterface{}, vmVLANs: map[string]map[string]map[int]*VMVLAN{},
 		routers: map[string]*Router{}, routerInterfaces: map[string]map[string]*RouterInterface{}, routerVLANs: map[string]map[string]map[int]*RouterVLAN{},
 		switches: map[string]*Switch{}, links: map[string]*Link{},
 	}
 	if err := indexNamed("template", c.Templates, func(v *Template) string { return v.Name }, idx.templates); err != nil {
+		return err
+	}
+	if err := indexNamed("storage", c.Storages, func(v *Storage) string { return v.Name }, idx.storages); err != nil {
 		return err
 	}
 	if err := indexNamed("management-host interface", c.ManagementHost.Interfaces, func(v *ManagementHostInterface) string { return v.Name }, idx.managementHostInterfaces); err != nil {
@@ -142,6 +146,13 @@ func (c *Config) LookupTemplate(name string) (*Template, bool) {
 		return v, ok
 	}
 	return findNamed(c.Templates, name, func(v *Template) string { return v.Name })
+}
+func (c *Config) LookupStorage(name string) (*Storage, bool) {
+	if c.index != nil {
+		v, ok := c.index.storages[name]
+		return v, ok
+	}
+	return findNamed(c.Storages, name, func(v *Storage) string { return v.Name })
 }
 func (c *Config) LookupManagementHostInterface(name string) (*ManagementHostInterface, bool) {
 	if c.index != nil {
@@ -253,6 +264,9 @@ func findID[T any](values []*T, id int, identity func(*T) int) (*T, bool) {
 }
 
 func (c *Config) VMNames() []string { return names(c.VMs, func(v *VM) string { return v.Name }) }
+func (c *Config) StorageNames() []string {
+	return names(c.Storages, func(v *Storage) string { return v.Name })
+}
 func (c *Config) RouterNames() []string {
 	return names(c.Routers, func(v *Router) string { return v.Name })
 }

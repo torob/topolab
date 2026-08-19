@@ -2,7 +2,7 @@
 
 ## 1. Status and scope
 
-This document specifies version 1 of `topolab`, a Linux-only tool for
+This document specifies `topolab`, a Linux-only tool for
 creating declarative network labs on one local KVM host. The implementation is
 written in Go and manages QEMU directly. It does not use libvirt.
 
@@ -16,10 +16,10 @@ The tool manages:
 - IPv4 addressing, static routing, DHCPv4, and NAT;
 - directional link latency, jitter, loss, and rate limits;
 - host-side link packet capture and directional counters;
-- read-only qcow2 templates with writable root overlays and additional disks;
+- read-only qcow2 templates with explicit file or LVM writable disks;
 - persisted, multiplexed QEMU serial logs.
 
-The following features are outside version 1:
+The following features are outside the scope of this specification:
 
 - IPv6;
 - dynamic routing protocols;
@@ -73,7 +73,7 @@ non-empty value. A relative working directory is resolved against the process's
 current directory. The command-line option takes precedence over the
 environment.
 
-Global VM-helper options are `--qemu-system PATH`, `--qemu-img PATH`,
+Global VM-helper options are `--qemu-system PATH`, `--qemu-img PATH`, `--lvm PATH`,
 `--ovmf-code PATH`, `--ovmf-vars PATH`, and `--xorriso PATH`. Executable
 overrides must resolve to executable regular files; firmware overrides must be
 readable regular files. The selected helpers are resolved once and used by
@@ -88,7 +88,7 @@ executables and the standard OVMF paths from Section 2.
 
 `up`
 : Validate prerequisites and templates, compare desired configuration with
-  persisted state, remove obsolete resources, replace a root overlay only when
+  persisted state, remove obsolete resources, replace a writable root disk only when
   its backing-template identity changes, repair missing networking, and ensure
   every QEMU VM is running.
 
@@ -189,6 +189,7 @@ The top-level structure is:
 ```yaml
 name: example
 templates: []
+storages: []
 management_host: {interfaces: []}
 vms: []
 routers: []
@@ -215,8 +216,10 @@ There must be at least one link or one external router interface.
 The selected working directory is CLI state and is not a field in the topology
 document. The `config` command requires and resolves it but does not create it.
 
-Every file and directory created by `topolab` must be beneath
-the selected working directory. This includes manifests, locks, writable disk
+Every ordinary topology file and directory created by `topolab` must be beneath
+the selected working directory. LVs in explicitly supplied VGs and UUID-keyed
+coordination locks beneath `/run/lock` are the storage-backend exceptions.
+Files include manifests, topology locks, writable file-disk
 images, OVMF variable stores, NoCloud seed images, PID files, Unix sockets,
 serial logs, packet captures, dnsmasq files, router configuration, and
 forwarding-ownership state. Runtime operations create the required directories
@@ -283,17 +286,59 @@ path must identify an existing regular file built separately from
 `topolab`.
 
 Every template must use the qcow2 format and must not itself have a backing
-file. The tool validates the format before use. It opens the template as a
-read-only base image and creates a separate writable qcow2 overlay for each
-QEMU VM. The guest image must include the driver needed by the VM's selected
-root-disk bus in its initramfs and must be able to boot its root filesystem
-from that bus. Templates used with the default `scsi` bus must include the
-VirtIO SCSI driver.
+file. The tool validates the format before use and treats the template as a
+read-only source. Each VM root is then constructed using its selected
+storage's explicit copy or snapshot mode: file snapshots are qcow2 overlays,
+while file copies and LVM roots do not retain a direct dependency on the
+template file. The guest image must include the driver needed by the VM's
+selected root-disk bus in its initramfs and must be able to boot its root
+filesystem from that bus. Templates used with the default `scsi` bus must
+include the VirtIO SCSI driver.
 
 Templates may be inside or outside `working_dir`. Even when a template is
 inside it, `topolab` never builds, modifies, or removes the template, and
 `down` removes only paths recorded as tool-created resources. Template
 contents are SHA-256 identified.
+
+### 4.2.1 Storage declarations
+
+Every VM disk explicitly references one entry in the top-level `storages`
+list. There is no implicit storage and no VM-level or topology-wide default.
+
+```yaml
+storages:
+  - {name: file-snapshot, type: file, root_provisioning: snapshot}
+  - {name: file-copy, type: file, root_provisioning: copy}
+  - name: thin-copy
+    type: lvm-thin
+    volume_group: lab-vg
+    pool_size_gib: 20
+    root_provisioning: copy
+  - name: thin-snapshot
+    type: lvm-thin
+    volume_group: lab-vg
+    pool_size_gib: 20
+    root_provisioning: snapshot
+  - {name: thick, type: lvm-thick, volume_group: lab-vg}
+```
+
+| Type | Required | Forbidden |
+| --- | --- | --- |
+| `file` | `name`, `type`, `root_provisioning` | `volume_group`, `pool_size_gib` |
+| `lvm-thin` | `name`, `type`, `volume_group`, `pool_size_gib`, `root_provisioning` | none |
+| `lvm-thick` | `name`, `type`, `volume_group` | `pool_size_gib`, `root_provisioning` |
+
+`root_provisioning` is exactly `copy` or `snapshot`. A forbidden field is an
+error even if explicitly empty or zero. Multiple declarations may share a
+supplied VG, but every thin declaration owns a distinct deterministic pool.
+`pool_size_gib` is pool data capacity; metadata consumes additional extents.
+
+TopoLab resolves `lvm` only for an LVM topology and accepts `--lvm` as an
+executable override. Supplied VGs and PVs are never created or removed. It
+uses machine-readable VG/LV reports, locks all involved VGs in sorted VG-UUID
+order, and revalidates identity, ownership, and capacity before mutation.
+Storage type, VG, and root-provisioning changes are immutable while resources
+exist. Thin pools and disks may increase, but not decrease.
 
 ### 4.3 Isolated management-host attachment
 
@@ -369,10 +414,12 @@ vms:
     root_disk:
       size_gib: 40
       bus: scsi
+      storage: thin
     additional_disks:
       - name: data
         size_gib: 100
         bus: scsi
+        storage: thick
     guest_agent: true
     boot:
       order: [disk, network]
@@ -425,7 +472,7 @@ removes the template's default trust roots.
 `cpu` optionally controls the CPU model and topology exposed to the guest.
 `cpu.model` defaults to `host`, which uses KVM host passthrough. It may instead
 name an x86 CPU model reported by `qemu-system-x86_64 -cpu help`; raw QEMU CPU
-feature suffixes such as `,vmx=off` are not accepted in this version. Before
+feature suffixes such as `,vmx=off` are not accepted. Before
 changing runtime state, the tool must verify that the selected model exists
 and can run with KVM on the current host.
 
@@ -437,7 +484,7 @@ that product with checked arithmetic, verify that QEMU and KVM support the
 result on the current host, and pass the total and every topology field
 explicitly to QEMU rather than relying on QEMU to infer omitted values. VM
 `vcpus` is not a configuration field. CPU hotplug and NUMA topology are outside
-this version.
+the scope of this specification.
 
 `memory_mb` is the amount of RAM allocated to QEMU and the maximum memory that
 can be made available to the guest by balloon deflation. `memory_balloon` is
@@ -558,7 +605,7 @@ and static DNS resolvers.
 VM interface and VLAN MTUs, layer-3 fields, `ssh_authorized_keys`, and
 `root_ca_certificates` are write-once bootstrap inputs, not continuously
 reconciled guest configuration.
-They are applied only when the VM's root overlay is first created. The manifest
+They are applied only when the VM's writable root disk is first created. The manifest
 records their normalized values and a VM-bootstrap hash. While that root
 overlay exists, changing any guest MTU, address, DHCP setting, VLAN, route, DNS
 server, authorized key, or effective Root CA content or order in the topology
@@ -575,18 +622,19 @@ configuration, services, firewall policy, and every other guest concern are
 also outside this tool. When an interface has neither `ipv4` nor `vlans`, the
 initial network configuration matches and names the device but does not
 configure layer 3 on it. If a backing-template change already requires a new
-root overlay, the current bootstrap inputs are applied to that new root and
+root disk, the current bootstrap inputs are applied to that new root and
 become its new recorded baseline.
 
 #### 4.4.2 VM storage
 
+`root_disk.storage` is required and names an existing top-level storage.
 `root_disk.size_gib` is optional and sets the root disk's virtual capacity in
 gibibytes. When omitted, the root disk uses the template's virtual capacity.
 When specified, it must be greater than or equal to the template's virtual
 capacity, rounded up to whole GiB. The tool reads the template capacity with
 `qemu-img` during preflight and rejects an incompatible value before creating
 or changing any runtime resource. The read-only template is never resized;
-the configured capacity applies to the VM's writable root overlay.
+the configured capacity applies to the VM's writable root disk.
 
 `root_disk.bus` selects how QEMU presents the root disk to the guest. It
 defaults to `scsi` and must be one of `scsi`, `virtio`, `sata`, `nvme`, or
@@ -594,9 +642,9 @@ defaults to `scsi` and must be one of `scsi`, `virtio`, `sata`, `nvme`, or
 
 `additional_disks` is an optional ordered list of additional writable data disks. Disk
 names use the resource-name rules and must be unique within the VM. Each disk
-requires a positive `size_gib`; its optional `bus` has the same values and
-defaults as `root_disk.bus`. A newly declared disk is created as an empty
-standalone qcow2 image beneath the VM's working directory. Additional disks
+requires a positive `size_gib` and an explicit `storage`; its optional `bus`
+has the same values and defaults as `root_disk.bus`. File data disks are
+standalone qcow2 images; LVM data disks are raw thick or thin LVs. Additional disks
 have deterministic QEMU identifiers and serial numbers. Their partitioning,
 filesystems, mounting, and application use are guest responsibilities.
 
@@ -646,7 +694,7 @@ Reordering `additional_disks` also requires a VM restart because it changes
 attachment addresses, but must preserve every disk image and its contents.
 
 All configured disks support increase-only resizing. Before applying any
-change, the tool must read the actual virtual capacity of the root overlay and
+change, the tool must read the actual virtual capacity of the root disk and
 every existing additional disk and validate the complete resize plan:
 
 - a desired capacity smaller than the actual capacity is an error;
@@ -676,6 +724,21 @@ guest. Guest-side online expansion must be performed by the guest, an operator,
 or separate configuration management. Templates intended to consume initial
 root-disk growth automatically should enable cloud-init `growpart` and
 `resizefs` or provide equivalent behavior.
+
+For `file`, snapshot roots are qcow2 overlays and copy roots are atomically
+published standalone sparse qcow2 images without backing files. `lvm-thick`
+roots are independent raw copies in fully allocated linear LVs. `lvm-thin`
+copy roots are independent thin LVs; snapshot roots share one read-only
+template LV per storage and template digest and are writable snapshots of it.
+Thin-LV zeroing is enabled and thick LVs are zeroed before publication.
+
+Pool, template-base, staging, and disk LV names are deterministic hashes and
+carry topology, storage, and kind ownership tags. Manifest version 2 records
+VG, LV, and pool UUIDs plus checkpointed resource intent. A retry completes
+interrupted work. Deletion is refused if UUIDs, tags, pool membership, or
+unexpected resources do not match the manifest. Declared thin virtual capacity
+above pool capacity and data or metadata utilization at or above 80 percent
+produce warnings; they do not block operation or autoextend a pool.
 
 #### 4.4.3 VM guest agent and boot
 
@@ -784,8 +847,7 @@ operator needs a particular address to be used.
 router interface may not set `ipv4`, `vlans`, or `nat`, and it must occur in no
 link endpoint. Conversely, a router interface without `external` must occur in
 exactly one link. External router interfaces do not support link-level `egress`
-impairment. A router may declare at most one external interface in this
-version.
+impairment. A router may declare at most one external interface.
 
 A regular untagged router interface declares `ipv4` directly on the base
 interface and must be referenced by exactly one link:
@@ -851,7 +913,7 @@ at runtime.
 A base router interface may declare `nat` with a required, non-empty list of
 unique IPv4 `sources`. The tool creates a source-masquerade rule for those
 prefixes with the containing interface as the implicit output interface. NAT
-is not allowed on a VLAN subinterface in this version. The router receives the
+is not allowed on a VLAN subinterface. The router receives the
 rule directly in its namespace. Removing or renaming the interface therefore
 cannot leave a dangling NAT output reference.
 
@@ -894,8 +956,8 @@ such as `wan` or the generated `<base>.<vlan>` name for a declared VLAN, such
 as `lan.20`. It may not name an external interface.
 
 The next hop must be a usable address covered by a static prefix on the named
-logical interface. A route through a DHCP-only layer is therefore invalid in
-this version. Route destinations must be unique within a router. Connected
+logical interface. A route through a DHCP-only layer is therefore invalid.
+Route destinations must be unique within a router. Connected
 routes are generated implicitly from interface addresses and must not be
 declared. A router with an external interface receives its default route
 through the generated host transit connection, so it may not declare another
@@ -1110,12 +1172,12 @@ Controller, IOThread, block-node, device, namespace, socket, and serial
 identifiers are deterministic from the topology, node, logical resource name,
 and selected device type.
 
-The root disk is a qcow2 overlay whose backing file is the template image. It
-is writable and may have a larger virtual capacity than its backing template.
-Each additional disk is an independent writable qcow2 image without a backing
-file. Templates are not chmod-modified or opened as writable disks. Running
-disk growth uses QMP `block_resize`; `qemu-img resize` must not be invoked on
-an image currently opened by a running QEMU process.
+File disks use qcow2 block nodes and LVM disks use raw block nodes. Root
+construction follows the selected storage's copy or snapshot semantics from
+Section 4.4.2; additional disks are independent. Templates are not
+chmod-modified or opened as writable disks. Running growth extends an LV
+before QMP `block_resize`. File growth uses QMP without invoking `qemu-img
+resize` on an image currently opened by QEMU.
 
 The generated NoCloud seed contains `meta-data`, `user-data`, and
 `network-config`. For a VM, the seed contains only its hostname, locked-
@@ -1124,7 +1186,7 @@ and initial interface names, MTUs, VLANs, IPv4 configuration, routes, and DNS
 resolvers. Its instance ID
 incorporates the topology name, node name, storage-identity hash, and recorded
 VM-bootstrap hash. The seed and instance ID remain unchanged for the lifetime
-of that root overlay. The manifest retains the normalized bootstrap values and
+of that writable root disk. The manifest retains the normalized bootstrap values and
 the digest of the exact rendered seed. A missing VM seed may be reconstructed
 only from that recorded bootstrap snapshot after the current configuration has
 passed the bootstrap-hash check; it must not be reconstructed from unrecorded
@@ -1169,15 +1231,16 @@ Only one operation may mutate a topology at a time; mutations take an
 exclusive file lock. Both management-host and router `exec` hold a shared lock
 for the full child lifetime.
 
-The manifest records a datapath version; deterministic fabric and management-
+The version-2 manifest records a datapath version; deterministic fabric and management-
 host namespace names and ownership aliases; namespace scope for every managed
 bridge, TAP, link, nftables table, counter, and ownership operation; distinct
 management-host, router, fabric, and root nftables state; and QEMU namespace
 identity. It distinguishes root-external resources from fabric resources. It
 also records configuration and host-network hashes, each VM's
 normalized bootstrap values and VM-bootstrap hash, template digests, VM
-storage-identity and restart hashes, every writable disk's path and observed
-virtual capacity, restart-only hardware settings, requested balloon targets,
+storage-identity and restart hashes, every writable disk's backend, path,
+format, provisioning, observed capacity, VG/LV/pool UUIDs and ownership tags,
+storage pool utilization and warnings, restart-only hardware settings, requested balloon targets,
 TAP names, external-interface host peers, transit allocations, host routes,
 and NAT state, management-host interfaces and isolation rules, per-link
 datapath generation IDs and start times, process endpoints, and owned host
@@ -1191,9 +1254,9 @@ resources.
    desired-versus-actual disk plan before any destructive change.
 3. Compute template, host-network, storage-identity, VM-bootstrap, and per-VM
    restart hashes.
-4. Stop VMs affected by a network rebuild, backing-template change, or
+4. Allocate and checkpoint required staging or replacement storage, then stop VMs affected by a network rebuild, backing-template change, or
    restart-only QEMU hardware-presentation change.
-5. Apply only the explicit disk deletions and root-overlay replacements defined
+5. Apply only the explicit disk deletions and root-disk replacements defined
    below. Network changes never add a disk to this deletion plan.
 6. Create and immediately checkpoint the fabric and management-host namespaces
    before network objects, then reconcile missing owned resources in their
@@ -1207,9 +1270,9 @@ resources.
    runtime helpers.
 9. Start every desired VM and atomically save the new manifest.
 
-A VM's storage-identity hash contains only the template path and
-template-content digest that define the backing file of its root overlay. A
-change to either value replaces that root overlay because an existing overlay
+A VM's storage-identity hash contains the template path and content digest plus
+the root storage identity and provisioning mode. A template-identity change
+replaces that root disk because an existing writable disk
 must not be silently rebased onto different template contents. It preserves
 every additional disk. Renaming a VM is represented as removal of the old VM
 and creation of a different VM, not as a storage-identity change.
@@ -1223,7 +1286,7 @@ configuration, VLANs, and link attachment; every router interface's MAC, MTU,
 IPv4 configuration, VLANs, and link attachment; router routes, DHCP-server
 configuration, NAT, and `external`; and all generated TAP, veth, bridge, and
 nftables details. Changing any combination of these properties must preserve
-the root overlay and every additional disk of every surviving VM.
+the root disk and every additional disk of every surviving VM.
 
 An attempted change to a VM's write-once guest MTU, address, DHCP, VLAN, route,
 DNS, authorized-key, or Root CA bootstrap inputs follows the preflight
@@ -1238,15 +1301,15 @@ boot settings, additional-disk membership, desired disk capacities, disk
 declaration order, disk bus settings, and VM interface model/queue settings
 are also reconciled outside the storage-identity hash. Changing any of those
 fields except only a disk increase or balloon `target_mb` may require a VM
-restart, but must not recreate the root overlay or any unchanged additional
+restart, but must not recreate the root disk or any unchanged additional
 disk. Disk increases and balloon-target changes use their online procedures
 when the VM is running.
 
-An unchanged root overlay and unchanged additional disks survive `stop`,
+An unchanged root disk and unchanged additional disks survive `stop`,
 `start`, `restart`, every network change, and host reboot. After reboot the
 operator reruns `up` to restore Linux networking and QEMU processes. A root
-overlay is deleted only when its VM is removed, its backing-template
-identity changes, or `down` is executed. An additional disk is deleted only
+disk is deleted only when its VM is removed, its template identity
+changes, or `down` is executed. An additional disk is deleted only
 when its name is explicitly removed from its VM, its VM is removed, or `down`
 is executed. Template changes and network changes never delete an additional
 disk. Increasing a capacity never deletes a writable disk.
@@ -1336,7 +1399,7 @@ as `null` in JSON and `-` in table output; it must not be fabricated as zero.
 Every result includes the topology and link names, collection timestamp,
 datapath generation ID, and generation start time. Counters are monotonic
 within a generation and reset only when that link's host datapath is rebuilt.
-There is no counter-reset operation in this version. Automated tests obtain
+There is no counter-reset operation. Automated tests obtain
 deltas by taking before and after snapshots and must reject a delta if the
 generation ID changed between them.
 
@@ -1357,7 +1420,7 @@ serial line.
 
 Logs persist with the writable VM layer. They survive process stop/start and
 every network change. They are removed only when the VM is removed, its
-root overlay is replaced after a backing-template identity change, or `down`
+root disk is replaced after a template-identity change, or `down`
 is executed. The collector PID is verified against its command line and socket
 before termination.
 
@@ -1467,7 +1530,7 @@ implementation internals. At minimum it must verify:
   trusted through the guest system CA bundle after initial bootstrap;
 - VM bootstrap values are applied initially and write-once changes are
   rejected without stopping the VM or changing a disk;
-- all documented network-only changes preserve the root overlay and every
+- all documented network-only changes preserve the root disk and every
   additional disk;
 - online disk growth and balloon-target changes follow their respective
   convergence contracts; and

@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-const ManifestVersion = 1
+const ManifestVersion = 2
 
 type Manifest struct {
 	Version                  int                                 `json:"version"`
@@ -33,8 +33,35 @@ type Manifest struct {
 	// NetworkState is the network package's versioned, ownership-bearing state.
 	// Keeping it opaque here avoids making the persistent state package depend
 	// on a Linux implementation package.
-	NetworkState json.RawMessage    `json:"network_state,omitempty"`
-	Helpers      map[string]*Helper `json:"helpers,omitempty"`
+	NetworkState json.RawMessage     `json:"network_state,omitempty"`
+	Helpers      map[string]*Helper  `json:"helpers,omitempty"`
+	Storages     map[string]*Storage `json:"storages,omitempty"`
+}
+
+// Storage records the identity of a declared backend and any TopoLab-owned
+// thin pool. Supplied VGs/PVs are deliberately never ownership records.
+type Storage struct {
+	Name             string       `json:"name"`
+	Type             string       `json:"type"`
+	RootProvisioning string       `json:"root_provisioning,omitempty"`
+	VolumeGroup      string       `json:"volume_group,omitempty"`
+	VGUUID           string       `json:"vg_uuid,omitempty"`
+	PoolName         string       `json:"pool_name,omitempty"`
+	PoolUUID         string       `json:"pool_uuid,omitempty"`
+	PoolRequested    uint64       `json:"pool_requested_bytes,omitempty"`
+	PoolSizeBytes    uint64       `json:"pool_size_bytes,omitempty"`
+	DataPercent      float64      `json:"data_percent,omitempty"`
+	MetadataPercent  float64      `json:"metadata_percent,omitempty"`
+	Warnings         []string     `json:"warnings,omitempty"`
+	Pending          string       `json:"pending,omitempty"`
+	Bases            []LVResource `json:"bases,omitempty"`
+}
+
+type LVResource struct {
+	Name    string   `json:"name"`
+	UUID    string   `json:"uuid"`
+	Tags    []string `json:"tags"`
+	Pending string   `json:"pending,omitempty"`
 }
 
 // Helper records a namespace-scoped process and every file it owns. IdentityArg
@@ -79,12 +106,28 @@ type Node struct {
 }
 
 type Disk struct {
-	Name          string `json:"name"`
-	Path          string `json:"path"`
-	Bus           string `json:"bus"`
-	BlockNode     string `json:"block_node"`
-	Serial        string `json:"serial"`
-	CapacityBytes uint64 `json:"capacity_bytes"`
+	Name          string   `json:"name"`
+	Path          string   `json:"path"`
+	Bus           string   `json:"bus"`
+	BlockNode     string   `json:"block_node"`
+	Serial        string   `json:"serial"`
+	CapacityBytes uint64   `json:"capacity_bytes"`
+	Storage       string   `json:"storage"`
+	StorageType   string   `json:"storage_type"`
+	Provisioning  string   `json:"provisioning,omitempty"`
+	Format        string   `json:"format"`
+	VolumeGroup   string   `json:"volume_group,omitempty"`
+	VGUUID        string   `json:"vg_uuid,omitempty"`
+	LVName        string   `json:"lv_name,omitempty"`
+	LVUUID        string   `json:"lv_uuid,omitempty"`
+	PoolName      string   `json:"pool_name,omitempty"`
+	PoolUUID      string   `json:"pool_uuid,omitempty"`
+	OriginName    string   `json:"origin_name,omitempty"`
+	OriginUUID    string   `json:"origin_uuid,omitempty"`
+	OwnershipTags []string `json:"ownership_tags,omitempty"`
+	Pending       string   `json:"pending,omitempty"`
+	StagingName   string   `json:"staging_name,omitempty"`
+	StagingUUID   string   `json:"staging_uuid,omitempty"`
 }
 
 type TAP struct {
@@ -135,7 +178,7 @@ type OwnedResource struct {
 }
 
 func NewManifest(topology string) *Manifest {
-	return &Manifest{Version: ManifestVersion, Topology: topology, Nodes: make(map[string]*Node), Links: make(map[string]*Link), ManagementHostInterfaces: make(map[string]*ManagementHostInterface), Helpers: make(map[string]*Helper)}
+	return &Manifest{Version: ManifestVersion, Topology: topology, Nodes: make(map[string]*Node), Links: make(map[string]*Link), ManagementHostInterfaces: make(map[string]*ManagementHostInterface), Helpers: make(map[string]*Helper), Storages: make(map[string]*Storage)}
 }
 
 func Load(path string) (*Manifest, error) {

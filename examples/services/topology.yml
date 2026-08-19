@@ -4,6 +4,9 @@ templates:
   - name: ubuntu-26.04
     path: "${TOPOLAB_TEMPLATE:?set TOPOLAB_TEMPLATE to an Ubuntu 26.04 amd64 cloud image}"
 
+storages:
+  - {name: local, type: file, root_provisioning: snapshot}
+
 management_host:
   interfaces:
     - name: admin
@@ -13,6 +16,7 @@ management_host:
 vms:
   - name: application
     template: ubuntu-26.04
+    root_disk: {storage: local}
     ssh_authorized_keys:
       - "${TOPOLAB_SSH_PUBLIC_KEY:?set TOPOLAB_SSH_PUBLIC_KEY to an OpenSSH public key}"
     interfaces:
@@ -24,6 +28,7 @@ vms:
             ipv4: {dhcp: true}
   - name: database
     template: ubuntu-26.04
+    root_disk: {storage: local}
     ssh_authorized_keys:
       - "${TOPOLAB_SSH_PUBLIC_KEY:?set TOPOLAB_SSH_PUBLIC_KEY to an OpenSSH public key}"
     interfaces:

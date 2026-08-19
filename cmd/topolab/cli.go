@@ -71,6 +71,7 @@ func (c CLI) Execute(ctx context.Context, args []string) int {
 	working := fs.String("working-dir", "", "working directory")
 	qemuSystem := fs.String("qemu-system", "", "qemu-system-x86_64 executable override")
 	qemuImg := fs.String("qemu-img", "", "qemu-img executable override")
+	lvm := fs.String("lvm", "", "lvm executable override")
 	ovmfCode := fs.String("ovmf-code", "", "OVMF code firmware override")
 	ovmfVars := fs.String("ovmf-vars", "", "OVMF variables firmware override")
 	xorriso := fs.String("xorriso", "", "xorriso executable override")
@@ -152,7 +153,7 @@ func (c CLI) Execute(ctx context.Context, args []string) int {
 		fmt.Fprintf(c.Stderr, "topolab: command %q is not implemented\n", name)
 		return 1
 	}
-	helpers := app.HelperOverrides{QEMUSystem: *qemuSystem, QEMUImg: *qemuImg, OVMFCode: *ovmfCode, OVMFVars: *ovmfVars, Xorriso: *xorriso}
+	helpers := app.HelperOverrides{QEMUSystem: *qemuSystem, QEMUImg: *qemuImg, LVM: *lvm, OVMFCode: *ovmfCode, OVMFVars: *ovmfVars, Xorriso: *xorriso}
 	if err := c.Runtime.Run(ctx, RuntimeCommand{Name: name, Args: append([]string(nil), rest[1:]...), Topology: result.Config, WorkingDir: result.WorkingDir, Helpers: helpers}); err != nil {
 		var childExit *app.ChildExitError
 		if errors.As(err, &childExit) {

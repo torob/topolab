@@ -21,6 +21,7 @@ type Memory struct {
 type Firmware struct{ Code, Vars string }
 type DiskSpec struct {
 	Name, Path, Bus, BlockNode, Serial string
+	Format                             string
 	Boot                               bool
 }
 type NICSpec struct {
@@ -142,9 +143,22 @@ func (b *Builder) Build(s NodeSpec) ([]string, error) {
 			return nil, fmt.Errorf("disk %s serial exceeds QEMU's 20-character limit", d.Name)
 		}
 		fileNode := "file-" + id
+		format := d.Format
+		if format == "" {
+			format = "qcow2"
+		}
+		if format != "qcow2" && format != "raw" {
+			return nil, fmt.Errorf("disk %s has unsupported format %q", d.Name, format)
+		}
+		protocol := "driver=file,node-name=" + fileNode + ",filename=" + escapeComma(d.Path) + ",auto-read-only=on,discard=unmap"
+		if format == "raw" {
+			// LVM paths are block devices, which require QEMU's host_device
+			// protocol rather than the regular-file protocol.
+			protocol = "driver=host_device,node-name=" + fileNode + ",filename=" + escapeComma(d.Path)
+		}
 		args = append(args,
-			"-blockdev", "driver=file,node-name="+fileNode+",filename="+escapeComma(d.Path)+",auto-read-only=on,discard=unmap",
-			"-blockdev", "driver=qcow2,node-name="+d.BlockNode+",file="+fileNode)
+			"-blockdev", protocol,
+			"-blockdev", "driver="+format+",node-name="+d.BlockNode+",file="+fileNode)
 		boot := ""
 		if diskBoot > 0 {
 			boot = fmt.Sprintf(",bootindex=%d", diskBoot+i)
@@ -279,8 +293,16 @@ func ID(prefix, logical string) string {
 	if slug == "" {
 		slug = "resource"
 	}
-	if len(slug) > 24 {
-		slug = slug[:24]
+	// QEMU block node names are limited to 31 bytes. The longest generated
+	// wrapper is "file-" plus this ID, so keep the shared ID at 26 bytes.
+	const maxID = 26
+	const hashLength = 8
+	maxSlug := maxID - len(prefix) - 2 - hashLength
+	if maxSlug < 1 {
+		maxSlug = 1
+	}
+	if len(slug) > maxSlug {
+		slug = slug[:maxSlug]
 	}
 	s := sha256.Sum256([]byte(prefix + "\x00" + logical))
 	return prefix + "-" + slug + "-" + hex.EncodeToString(s[:4])

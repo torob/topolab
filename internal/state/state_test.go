@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -68,17 +69,13 @@ func TestSharedLocksCoexistAndBlockExclusiveLock(t *testing.T) {
 	}
 }
 
-func TestLegacyManifestIsRecognizedForMigration(t *testing.T) {
+func TestLegacyManifestIsRejectedWithoutMigration(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "manifest.json")
 	if err := os.WriteFile(path, []byte(`{"version":1,"topology":"legacy","host_interfaces":{"management":{"logical_name":"management"}},"network_state":{"topology":"legacy"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	manifest, err := Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if manifest.DatapathVersion != 0 || manifest.LegacyHostInterfaces["management"] == nil {
-		t.Fatalf("legacy manifest not recognized: %#v", manifest)
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "unsupported manifest version 1") {
+		t.Fatalf("legacy manifest error = %v", err)
 	}
 }
 

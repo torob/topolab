@@ -4,6 +4,9 @@ templates:
   - name: ubuntu-26.04
     path: "${TOPOLAB_TEMPLATE:?set TOPOLAB_TEMPLATE to the Ubuntu 26.04 qcow2 template}"
 
+storages:
+  - {name: local, type: file, root_provisioning: snapshot}
+
 management_host:
   interfaces:
     - name: service
@@ -13,6 +16,7 @@ management_host:
 vms:
   - name: gateway
     template: ubuntu-26.04
+    root_disk: {storage: local}
     cpu: {model: host, sockets: 1, cores: 2, threads: 1}
     memory_mb: 2048
     guest_agent: true
@@ -32,6 +36,7 @@ vms:
           dns_servers: [1.1.1.1]
   - name: application
     template: ubuntu-26.04
+    root_disk: {storage: local}
     ssh_authorized_keys:
       - "${TOPOLAB_SSH_PUBLIC_KEY:?set TOPOLAB_SSH_PUBLIC_KEY to an OpenSSH public key}"
     interfaces:
@@ -42,6 +47,7 @@ vms:
           dns_servers: [1.1.1.1]
   - name: client
     template: ubuntu-26.04
+    root_disk: {storage: local}
     ssh_authorized_keys:
       - "${TOPOLAB_SSH_PUBLIC_KEY:?set TOPOLAB_SSH_PUBLIC_KEY to an OpenSSH public key}"
     interfaces:

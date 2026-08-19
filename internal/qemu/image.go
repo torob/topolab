@@ -167,6 +167,53 @@ func (m *ImageManager) CreateDataDisk(ctx context.Context, destination string, c
 	return syncDir(filepath.Dir(destination))
 }
 
+// CreateCopy atomically creates a standalone sparse qcow2 image from a
+// template. Unlike an overlay it never retains a backing-file dependency.
+func (m *ImageManager) CreateCopy(ctx context.Context, destination string, template TemplateInfo, capacity uint64) error {
+	if capacity < template.CapacityBytes {
+		return errors.New("copy capacity is smaller than template")
+	}
+	if _, err := os.Lstat(destination); err == nil {
+		return fmt.Errorf("destination already exists: %s", destination)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
+		return err
+	}
+	tmp, err := tempImageName(destination)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp)
+	if _, err := m.Runner.Run(ctx, m.QEMUImg, "convert", "-f", "qcow2", "-O", "qcow2", "-S", "4k", template.Path, tmp); err != nil {
+		return err
+	}
+	info, err := m.Info(ctx, tmp)
+	if err != nil {
+		return err
+	}
+	if capacity > info.VirtualSize {
+		if _, err := m.Runner.Run(ctx, m.QEMUImg, "resize", tmp, fmt.Sprintf("%d", capacity)); err != nil {
+			return err
+		}
+	}
+	if err := os.Chmod(tmp, 0o600); err != nil {
+		return err
+	}
+	if err := renameNoReplace(tmp, destination); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(destination))
+}
+
+// ConvertToRaw writes a qcow2 template into an already allocated block
+// device. The destination is explicit and is never created or removed here.
+func (m *ImageManager) ConvertToRaw(ctx context.Context, source, destination string) error {
+	_, err := m.Runner.Run(ctx, m.QEMUImg, "convert", "-f", "qcow2", "-O", "raw", "-S", "4k", source, destination)
+	return err
+}
+
 type Growth struct {
 	Path, BlockNode string
 	Actual, Desired uint64
