@@ -151,21 +151,21 @@ func vmRestartSnapshot(cfg *config.Config, name string, vm *config.VM) any {
 		Name, Model string
 		Queues      int
 	}
-	type disk struct{ Name, Bus string }
+	type disk struct{ Name, Bus, Cache string }
 	r := struct {
 		CPU                 *config.CPU
 		Memory              int
 		Balloon, GuestAgent bool
-		RootBus             string
+		RootBus, RootCache  string
 		Boot                config.Boot
 		NICs                []nic
 		Disks               []disk
-	}{vm.CPU, vm.MemoryMB, vm.MemoryBalloon.Enabled, vm.GuestAgent, vm.RootDisk.Bus, vm.Boot, nil, nil}
+	}{vm.CPU, vm.MemoryMB, vm.MemoryBalloon.Enabled, vm.GuestAgent, vm.RootDisk.Bus, vm.RootDisk.Cache, vm.Boot, nil, nil}
 	for _, i := range vm.Interfaces {
 		r.NICs = append(r.NICs, nic{i.Name, i.Model, i.Queues})
 	}
 	for _, d := range vm.AdditionalDisks {
-		r.Disks = append(r.Disks, disk{d.Name, d.Bus})
+		r.Disks = append(r.Disks, disk{d.Name, d.Bus, d.Cache})
 	}
 	return r
 }
@@ -602,9 +602,13 @@ func (a *App) qemuSpec(cfg *config.Config, name string, n *state.Node, netState 
 		}
 		s.NICs = append(s.NICs, qemu.NICSpec{Name: in, Model: v.Model, MAC: v.MAC, TAP: tap.Name, Queues: v.Queues})
 	}
-	s.Disks = append(s.Disks, qemu.DiskSpec{Name: "root", Path: n.RootDisk.Path, Bus: n.RootDisk.Bus, BlockNode: n.RootDisk.BlockNode, Serial: n.RootDisk.Serial, Format: n.RootDisk.Format, Boot: true})
+	s.Disks = append(s.Disks, qemu.DiskSpec{Name: "root", Path: n.RootDisk.Path, Bus: n.RootDisk.Bus, BlockNode: n.RootDisk.BlockNode, Serial: n.RootDisk.Serial, Format: n.RootDisk.Format, Cache: vm.RootDisk.Cache, Boot: true})
 	for _, d := range n.AdditionalDisks {
-		s.Disks = append(s.Disks, qemu.DiskSpec{Name: d.Name, Path: d.Path, Bus: d.Bus, BlockNode: d.BlockNode, Serial: d.Serial, Format: d.Format})
+		configured, ok := cfg.LookupVMAdditionalDisk(name, d.Name)
+		if !ok {
+			return s, fmt.Errorf("node %s has undeclared disk %s", name, d.Name)
+		}
+		s.Disks = append(s.Disks, qemu.DiskSpec{Name: d.Name, Path: d.Path, Bus: d.Bus, BlockNode: d.BlockNode, Serial: d.Serial, Format: d.Format, Cache: configured.Cache})
 	}
 	return s, nil
 }

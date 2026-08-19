@@ -127,7 +127,7 @@ vms:
     template: ubuntu
     root_disk: {storage: thin, size_gib: 8}
     additional_disks:
-      - {name: data, storage: thick, size_gib: 4}
+      - {name: data, storage: thick, size_gib: 4, cache: writeback}
 ```
 
 `root_provisioning` is required and is `copy` or `snapshot` for `file` and
@@ -136,6 +136,18 @@ vms:
 even when explicitly empty or zero. Storage/VG/provisioning changes, disk
 shrinks, and thin-pool reductions are rejected before mutation. Pools and disks
 may grow; thin utilization and overcommit are warnings rather than blockers.
+
+Every root and additional disk defaults to `cache: none`, which makes both the
+QEMU format and protocol block nodes use direct I/O and bypass the host page
+cache while keeping guest flushes enabled. Set `cache: writeback` on an
+individual disk to retain buffered host I/O for that disk. Direct I/O avoids
+double caching and host page-cache pressure, but workloads may perform
+differently and the backing filesystem or block device must support it; QEMU
+startup fails instead of silently falling back when it does not. Changing a
+disk's cache policy restarts only its VM and preserves the disk. On upgrade,
+existing configurations without `cache` intentionally switch to direct I/O on
+their next `up`; add `cache: writeback` to disks that should keep the previous
+buffered behavior.
 
 LVM zeroing is opt-in. `zero_new_blocks: true` is valid only for `lvm-thin`
 and makes LVM clear newly allocated pool chunks; the setting is fixed when the

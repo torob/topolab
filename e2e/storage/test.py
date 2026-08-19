@@ -18,6 +18,7 @@ import random
 import shutil
 import shlex
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -50,6 +51,31 @@ def report(command: Sequence[str], section: str) -> list[dict[str, str]]:
     result = run((*command, "--reportformat", "json", "--units", "b", "--nosuffix"))
     payload = json.loads(result.stdout)
     return [row for item in payload.get("report", []) for row in item.get(section, [])]
+
+
+def qmp_execute(path: str, command: str, arguments: dict[str, Any] | None = None) -> Any:
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+        connection.settimeout(30)
+        connection.connect(path)
+        stream = connection.makefile("rwb")
+        greeting = json.loads(stream.readline())
+        require("QMP" in greeting, f"invalid QMP greeting from {path}: {greeting}")
+
+        def request(identifier: str, execute: str, args: dict[str, Any] | None = None) -> Any:
+            payload: dict[str, Any] = {"execute": execute, "id": identifier}
+            if args is not None:
+                payload["arguments"] = args
+            stream.write(json.dumps(payload).encode() + b"\n")
+            stream.flush()
+            while True:
+                response = json.loads(stream.readline())
+                if response.get("id") != identifier:
+                    continue
+                require("error" not in response, f"QMP {execute} failed: {response.get('error')}")
+                return response.get("return")
+
+        request("capabilities", "qmp_capabilities")
+        return request("command", command, arguments)
 
 
 def atomic_json(path: Path, value: dict[str, Any]) -> None:
@@ -263,7 +289,8 @@ class Fixture:
 def vm_block(number: int, storage: str, address: str) -> str:
     key = "${TOPOLAB_SSH_PUBLIC_KEY:?set by harness}"
     data_storage = "thick-wipe" if number == 1 else "thick" if number % 3 == 1 else "thin-copy" if number % 3 == 2 else "file-copy"
-    disks = [f"      - {{name: data-{number}, size_gib: 1, storage: {data_storage}}}"]
+    cache = ", cache: writeback" if number == 1 else ""
+    disks = [f"      - {{name: data-{number}, size_gib: 1, storage: {data_storage}{cache}}}"]
     if number == 2:
         disks.append("      - {name: pressure, size_gib: 6, storage: thin-copy}")
     return f"""  - name: vm{number}
@@ -359,15 +386,41 @@ def assert_storage_layout(harness: Harness, fixture: Fixture) -> None:
             require(not info.get("backing-filename"), "file copy unexpectedly has a backing file")
     for number in range(1, 7):
         pid = int(manifest["nodes"][f"vm{number}"]["pid"])
-        command = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode()
+        argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+        blockdevs = [argv[index + 1].decode() for index, value in enumerate(argv[:-1]) if value == b"-blockdev"]
+        blockdev_by_name = {
+            next(field.removeprefix("node-name=") for field in argument.split(",") if field.startswith("node-name=")): argument
+            for argument in blockdevs
+        }
         node = manifest["nodes"][f"vm{number}"]
+        named_nodes = {
+            item["node-name"]: item
+            for item in qmp_execute(node["qmp_path"], "query-named-block-nodes")
+        }
         for disk in [node["root_disk"], *node.get("additional_disks", [])]:
             block_node = disk["block_node"]
-            expected = f"driver={disk['format']},node-name={block_node},"
-            require(expected in command, f"QEMU format mismatch for vm{number}/{disk['name']}: expected {expected}")
             protocol = "host_device" if disk["format"] == "raw" else "file"
             protocol_node = "file-" + block_node.removeprefix("blk-")
-            require(f"driver={protocol},node-name={protocol_node}," in command, f"QEMU protocol mismatch for vm{number}/{disk['name']}: expected {protocol}")
+            direct = not (number == 1 and disk["name"] == "data-1")
+            direct_arg = "on" if direct else "off"
+            require(block_node in blockdev_by_name and blockdev_by_name[block_node].startswith(f"driver={disk['format']},"), f"QEMU format mismatch for vm{number}/{disk['name']}")
+            require(protocol_node in blockdev_by_name and blockdev_by_name[protocol_node].startswith(f"driver={protocol},"), f"QEMU protocol mismatch for vm{number}/{disk['name']}")
+            for layer in (block_node, protocol_node):
+                argument = blockdev_by_name[layer]
+                require(f"cache.direct={direct_arg}" in argument and "cache.no-flush=off" in argument, f"QEMU argv cache mismatch for vm{number}/{disk['name']} layer {layer}: {argument}")
+                cache = named_nodes[layer]["cache"]
+                require(cache["direct"] is direct and cache["no-flush"] is False, f"QMP cache mismatch for vm{number}/{disk['name']} layer {layer}: {cache}")
+        if number == 1:
+            template = Path(node["template_path"]).resolve()
+            backing_nodes = [
+                item for item in named_nodes.values()
+                if item.get("drv") == "qcow2"
+                and item.get("node-name") != node["root_disk"]["block_node"]
+                and item.get("file")
+                and Path(item["file"]).resolve() == template
+            ]
+            require(backing_nodes, "QMP omitted the qcow2 snapshot backing node")
+            require(all(item["cache"]["direct"] is True and item["cache"]["no-flush"] is False for item in backing_nodes), f"qcow2 backing nodes are not direct I/O: {backing_nodes}")
 
 
 def main() -> None:
@@ -476,7 +529,7 @@ def main() -> None:
         harness.replace_topology("pool_size_gib: 9, root_provisioning: snapshot", "pool_size_gib: 9, root_provisioning: copy", count=1)
 
         # Kill TopoLab immediately after one targeted LVM creation; the next up recovers the checkpoint.
-        harness.replace_topology("      - {name: data-1, size_gib: 1, storage: thick-wipe}", "      - {name: data-1, size_gib: 1, storage: thick-wipe}\n      - {name: interrupted, size_gib: 1, storage: thick-wipe}")
+        harness.replace_topology("      - {name: data-1, size_gib: 1, storage: thick-wipe, cache: writeback}", "      - {name: data-1, size_gib: 1, storage: thick-wipe, cache: writeback}\n      - {name: interrupted, size_gib: 1, storage: thick-wipe}")
         wrapper = fixture.root / "lvm-kill-wrapper"
         real_lvm = shutil.which("lvm")
         require(real_lvm is not None, "lvm disappeared")

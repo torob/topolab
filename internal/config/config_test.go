@@ -314,10 +314,88 @@ func TestParseDefaultsInterpolationAndMarshal(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(out)
-	for _, want := range []string{"management_host:", "interfaces: []", "root_ca_certificates: []", "memory_mb: 2048", "model: virtio", "queues: 1", "bus: scsi", "mtu: 1500"} {
+	for _, want := range []string{"management_host:", "interfaces: []", "root_ca_certificates: []", "memory_mb: 2048", "model: virtio", "queues: 1", "bus: scsi", "cache: none", "mtu: 1500"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("normalized YAML lacks %q:\n%s", want, text)
 		}
+	}
+}
+
+func TestDiskCacheNormalizationValidationAndRoundTrip(t *testing.T) {
+	doc, template := validVMDocument(t, "")
+	lookup := func(name string) (string, bool) {
+		switch name {
+		case "IMAGE":
+			return template, true
+		case "KEY":
+			return testKey(t), true
+		default:
+			return "", false
+		}
+	}
+	withDisk := strings.Replace(string(doc), "    interfaces:\n", "    additional_disks:\n      - {name: data, size_gib: 1, storage: local}\n    interfaces:\n", 1)
+	cfg, _, err := Parse([]byte(withDisk), t.TempDir(), lookup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vm, _ := cfg.LookupVM("vm")
+	if vm.RootDisk.Cache != "none" || vm.AdditionalDisks[0].Cache != "none" {
+		t.Fatalf("cache defaults = root %q additional %q", vm.RootDisk.Cache, vm.AdditionalDisks[0].Cache)
+	}
+	out, err := Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(out), "cache: none") != 2 {
+		t.Fatalf("normalized YAML omitted cache defaults:\n%s", out)
+	}
+	roundTrip, _, err := Parse(out, t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roundTripVM, _ := roundTrip.LookupVM("vm")
+	if roundTripVM.RootDisk.Cache != "none" || roundTripVM.AdditionalDisks[0].Cache != "none" {
+		t.Fatalf("round trip changed cache policies: %#v", roundTripVM)
+	}
+
+	writeback := strings.Replace(withDisk, "root_disk: {storage: local}", "root_disk: {storage: local, cache: writeback}", 1)
+	writeback = strings.Replace(writeback, "size_gib: 1, storage: local}", "size_gib: 1, storage: local, cache: writeback}", 1)
+	cfg, _, err = Parse([]byte(writeback), t.TempDir(), lookup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vm, _ = cfg.LookupVM("vm")
+	if vm.RootDisk.Cache != "writeback" || vm.AdditionalDisks[0].Cache != "writeback" {
+		t.Fatalf("explicit cache policies not preserved: %#v", vm)
+	}
+	out, err = Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roundTrip, _, err = Parse(out, t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roundTripVM, _ = roundTrip.LookupVM("vm")
+	if roundTripVM.RootDisk.Cache != "writeback" || roundTripVM.AdditionalDisks[0].Cache != "writeback" {
+		t.Fatalf("round trip changed explicit cache policies: %#v", roundTripVM)
+	}
+
+	for _, test := range []struct {
+		name, old, replacement, want string
+	}{
+		{"root unknown", "root_disk: {storage: local}", "root_disk: {storage: local, cache: unsafe}", `root_disk: cache must be none or writeback, got "unsafe"`},
+		{"additional unknown", "size_gib: 1, storage: local}", "size_gib: 1, storage: local, cache: unsafe}", `disk "data": cache must be none or writeback, got "unsafe"`},
+		{"root empty string", "root_disk: {storage: local}", "root_disk: {storage: local, cache: ''}", "cache may not be empty"},
+		{"additional null value", "size_gib: 1, storage: local}", "size_gib: 1, storage: local, cache: null}", "cache may not be empty"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			changed := strings.Replace(withDisk, test.old, test.replacement, 1)
+			_, _, err := Parse([]byte(changed), t.TempDir(), lookup)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+		})
 	}
 }
 

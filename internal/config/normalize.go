@@ -67,12 +67,18 @@ func normalize(c *Config, baseDir string) error {
 		if vm.RootDisk.Bus == "" {
 			vm.RootDisk.Bus = "scsi"
 		}
+		if vm.RootDisk.Cache == "" {
+			vm.RootDisk.Cache = "none"
+		}
 		if vm.AdditionalDisks == nil {
 			vm.AdditionalDisks = []*Disk{}
 		}
 		for _, disk := range vm.AdditionalDisks {
 			if disk.Bus == "" {
 				disk.Bus = "scsi"
+			}
+			if disk.Cache == "" {
+				disk.Cache = "none"
 			}
 		}
 		if len(vm.Boot.Order) == 0 {

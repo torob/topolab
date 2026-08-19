@@ -396,6 +396,54 @@ func TestRootCapacityBelowTemplateFailsBeforeMaterialization(t *testing.T) {
 	}
 }
 
+func TestDiskCacheChangesOnlyAffectedVMRestartIdentity(t *testing.T) {
+	base, err := os.MkdirTemp("/tmp", "tlcache-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	layout, err := state.NewLayout(base, "lab")
+	if err != nil {
+		t.Fatal(err)
+	}
+	storage := &config.Storage{Name: "local", Type: "file", RootProvisioning: "snapshot"}
+	vm := func(name string) *config.VM {
+		return &config.VM{
+			Name: name, Template: "base", MemoryBalloon: &config.MemoryBalloon{},
+			RootDisk:        config.RootDisk{Storage: "local", Bus: "scsi", Cache: "none"},
+			AdditionalDisks: []*config.Disk{{Name: "data", SizeGiB: 1, Storage: "local", Bus: "scsi", Cache: "none"}},
+		}
+	}
+	cfg := &config.Config{Name: "lab", Storages: []*config.Storage{storage}, VMs: []*config.VM{vm("vm1"), vm("vm2")}}
+	templates := map[string]qemu.TemplateInfo{"base": {Path: "/base.qcow2", Digest: "digest", CapacityBytes: qemu.GiB}}
+	before, err := New(nil, nil).desiredNodes(cfg, layout, templates)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.VMs[0].RootDisk.Cache = "writeback"
+	afterRoot, err := New(nil, nil).desiredNodes(cfg, layout, templates)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before["vm1"].RestartHash == afterRoot["vm1"].RestartHash || before["vm2"].RestartHash != afterRoot["vm2"].RestartHash {
+		t.Fatalf("root cache change affected wrong restart hashes: before=%#v after=%#v", before, afterRoot)
+	}
+	if before["vm1"].StorageIdentityHash != afterRoot["vm1"].StorageIdentityHash || before["vm1"].RootDisk.Path != afterRoot["vm1"].RootDisk.Path || before["vm1"].AdditionalDisks[0].Path != afterRoot["vm1"].AdditionalDisks[0].Path {
+		t.Fatal("root cache change altered storage identity")
+	}
+	cfg.VMs[0].AdditionalDisks[0].Cache = "writeback"
+	afterAdditional, err := New(nil, nil).desiredNodes(cfg, layout, templates)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterRoot["vm1"].RestartHash == afterAdditional["vm1"].RestartHash || afterRoot["vm2"].RestartHash != afterAdditional["vm2"].RestartHash {
+		t.Fatalf("additional cache change affected wrong restart hashes: root=%#v additional=%#v", afterRoot, afterAdditional)
+	}
+	if afterRoot["vm1"].StorageIdentityHash != afterAdditional["vm1"].StorageIdentityHash || afterRoot["vm1"].AdditionalDisks[0].Path != afterAdditional["vm1"].AdditionalDisks[0].Path {
+		t.Fatal("additional cache change altered storage identity")
+	}
+}
+
 func TestTranslateNetworkUsesRouterEndpoint(t *testing.T) {
 	cfg := &config.Config{
 		Name:     "lab",

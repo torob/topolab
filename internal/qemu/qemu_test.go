@@ -38,7 +38,7 @@ func TestBuildArgs(t *testing.T) {
 }
 
 func TestBuildUsesQCOW2ForFilesAndRawForLVM(t *testing.T) {
-	s := NodeSpec{Topology: "lab", Name: "vm", CPU: CPU{Model: "host", Sockets: 1, Cores: 1, Threads: 1}, Memory: Memory{MiB: 128}, Firmware: Firmware{Code: "c", Vars: "v"}, QMPPath: "q", PIDFile: "p", SerialSocket: "s", Disks: []DiskSpec{{Name: "file", Path: "/state/file.qcow2", Format: "qcow2"}, {Name: "lv", Path: "/dev/vg/lv", Format: "raw"}}}
+	s := NodeSpec{Topology: "lab", Name: "vm", CPU: CPU{Model: "host", Sockets: 1, Cores: 1, Threads: 1}, Memory: Memory{MiB: 128}, Firmware: Firmware{Code: "c", Vars: "v"}, QMPPath: "q", PIDFile: "p", SerialSocket: "s", Disks: []DiskSpec{{Name: "file", Path: "/state/file.qcow2", Format: "qcow2", Cache: "none"}, {Name: "lv", Path: "/dev/vg/lv", Format: "raw", Cache: "writeback"}}}
 	args, err := NewBuilder("").Build(s)
 	if err != nil {
 		t.Fatal(err)
@@ -52,6 +52,32 @@ func TestBuildUsesQCOW2ForFilesAndRawForLVM(t *testing.T) {
 	}
 	if !strings.Contains(joined, "driver=file,node-name=file-disk-file-") || !strings.Contains(joined, "filename=/state/file.qcow2") || !strings.Contains(joined, "driver=host_device,node-name=file-disk-lv-") || !strings.Contains(joined, "filename=/dev/vg/lv") {
 		t.Fatalf("missing file/host-device protocol nodes: %s", joined)
+	}
+	var blockdevs []string
+	for i, arg := range args {
+		if arg == "-blockdev" {
+			blockdevs = append(blockdevs, args[i+1])
+		}
+	}
+	if len(blockdevs) != 4 {
+		t.Fatalf("blockdev arguments = %v", blockdevs)
+	}
+	for _, index := range []int{0, 1} {
+		if !strings.Contains(blockdevs[index], "cache.direct=on") || !strings.Contains(blockdevs[index], "cache.no-flush=off") {
+			t.Errorf("direct-I/O file node layer %d = %q", index, blockdevs[index])
+		}
+	}
+	for _, index := range []int{2, 3} {
+		if !strings.Contains(blockdevs[index], "cache.direct=off") || !strings.Contains(blockdevs[index], "cache.no-flush=off") {
+			t.Errorf("writeback LVM node layer %d = %q", index, blockdevs[index])
+		}
+	}
+}
+
+func TestBuildRejectsUnsupportedDiskCachePolicy(t *testing.T) {
+	s := NodeSpec{Topology: "lab", Name: "vm", CPU: CPU{Model: "host", Sockets: 1, Cores: 1, Threads: 1}, Memory: Memory{MiB: 128}, Firmware: Firmware{Code: "c", Vars: "v"}, QMPPath: "q", PIDFile: "p", SerialSocket: "s", Disks: []DiskSpec{{Name: "root", Path: "/root.qcow2", Cache: "unsafe"}}}
+	if _, err := NewBuilder("").Build(s); err == nil || !strings.Contains(err.Error(), `disk root has unsupported cache policy "unsafe"`) {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

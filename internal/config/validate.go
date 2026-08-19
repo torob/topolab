@@ -231,6 +231,9 @@ func validateVM(c *Config, name string, vm *VM, macs map[string]string, ips map[
 	if err := validBus(vm.RootDisk.Bus); err != nil {
 		return fmt.Errorf("VM %q root_disk: %w", name, err)
 	}
+	if err := validDiskCache(vm.RootDisk.Cache); err != nil {
+		return fmt.Errorf("VM %q root_disk: %w", name, err)
+	}
 	if vm.RootDisk.Storage == "" {
 		return fmt.Errorf("VM %q root_disk.storage is required", name)
 	}
@@ -255,6 +258,9 @@ func validateVM(c *Config, name string, vm *VM, macs map[string]string, ips map[
 			return fmt.Errorf("VM %q disk %q references unknown storage %q", name, diskName, d.Storage)
 		}
 		if err := validBus(d.Bus); err != nil {
+			return fmt.Errorf("VM %q disk %q: %w", name, diskName, err)
+		}
+		if err := validDiskCache(d.Cache); err != nil {
 			return fmt.Errorf("VM %q disk %q: %w", name, diskName, err)
 		}
 	}
@@ -324,6 +330,13 @@ func validateVM(c *Config, name string, vm *VM, macs map[string]string, ips map[
 				return err
 			}
 		}
+	}
+	return nil
+}
+
+func validDiskCache(cache string) error {
+	if cache != "none" && cache != "writeback" {
+		return fmt.Errorf("cache must be none or writeback, got %q", cache)
 	}
 	return nil
 }

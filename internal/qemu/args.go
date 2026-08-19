@@ -21,7 +21,7 @@ type Memory struct {
 type Firmware struct{ Code, Vars string }
 type DiskSpec struct {
 	Name, Path, Bus, BlockNode, Serial string
-	Format                             string
+	Format, Cache                      string
 	Boot                               bool
 }
 type NICSpec struct {
@@ -150,15 +150,26 @@ func (b *Builder) Build(s NodeSpec) ([]string, error) {
 		if format != "qcow2" && format != "raw" {
 			return nil, fmt.Errorf("disk %s has unsupported format %q", d.Name, format)
 		}
-		protocol := "driver=file,node-name=" + fileNode + ",filename=" + escapeComma(d.Path) + ",auto-read-only=on,discard=unmap"
+		cache := d.Cache
+		if cache == "" {
+			cache = "none"
+		}
+		direct := "on"
+		if cache == "writeback" {
+			direct = "off"
+		} else if cache != "none" {
+			return nil, fmt.Errorf("disk %s has unsupported cache policy %q", d.Name, cache)
+		}
+		cacheOptions := ",cache.direct=" + direct + ",cache.no-flush=off"
+		protocol := "driver=file,node-name=" + fileNode + ",filename=" + escapeComma(d.Path) + ",auto-read-only=on,discard=unmap" + cacheOptions
 		if format == "raw" {
 			// LVM paths are block devices, which require QEMU's host_device
 			// protocol rather than the regular-file protocol.
-			protocol = "driver=host_device,node-name=" + fileNode + ",filename=" + escapeComma(d.Path)
+			protocol = "driver=host_device,node-name=" + fileNode + ",filename=" + escapeComma(d.Path) + cacheOptions
 		}
 		args = append(args,
 			"-blockdev", protocol,
-			"-blockdev", "driver="+format+",node-name="+d.BlockNode+",file="+fileNode)
+			"-blockdev", "driver="+format+",node-name="+d.BlockNode+",file="+fileNode+cacheOptions)
 		boot := ""
 		if diskBoot > 0 {
 			boot = fmt.Sprintf(",bootindex=%d", diskBoot+i)

@@ -151,6 +151,7 @@ type RootDisk struct {
 	SizeGiB *uint64 `yaml:"size_gib,omitempty"`
 	Bus     string  `yaml:"bus"`
 	Storage string  `yaml:"storage"`
+	Cache   string  `yaml:"cache"`
 }
 
 type Disk struct {
@@ -158,6 +159,7 @@ type Disk struct {
 	SizeGiB uint64 `yaml:"size_gib"`
 	Bus     string `yaml:"bus"`
 	Storage string `yaml:"storage"`
+	Cache   string `yaml:"cache"`
 }
 
 type Boot struct {

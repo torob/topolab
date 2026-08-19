@@ -420,11 +420,13 @@ vms:
       size_gib: 40
       bus: scsi
       storage: thin
+      cache: none
     additional_disks:
       - name: data
         size_gib: 100
         bus: scsi
         storage: thick
+        cache: writeback
     guest_agent: true
     boot:
       order: [disk, network]
@@ -653,6 +655,16 @@ standalone qcow2 images; LVM data disks are raw thick or thin LVs. Additional di
 have deterministic QEMU identifiers and serial numbers. Their partitioning,
 filesystems, mounting, and application use are guest responsibilities.
 
+`root_disk.cache` and each additional disk's `cache` select host caching for
+that disk. The value defaults to `none` and must be either `none` or
+`writeback`; an explicitly empty value is invalid. `none` enables direct I/O so
+disk data bypasses the host page cache, while `writeback` opts that disk back
+into buffered host I/O. Both modes keep flushes enabled. Direct I/O avoids
+double caching and reduces host page-cache pressure, but can change workload
+performance and requires support from the underlying filesystem or block
+device. An unsupported direct-I/O backend must make VM startup fail clearly;
+the tool must not silently fall back to buffered I/O.
+
 Disk declaration order is significant. The root disk is always created and
 attached first, before every additional disk, and receives the VM's first disk
 boot priority. Additional disks are created and attached in their YAML source
@@ -697,6 +709,11 @@ created. Root-disk boot-driver compatibility is a template responsibility and
 cannot be proven by inspecting the qcow2 format alone.
 Reordering `additional_disks` also requires a VM restart because it changes
 attachment addresses, but must preserve every disk image and its contents.
+Changing a root or additional disk's `cache` also changes only that VM's
+restart hash and restarts it without changing storage identity or recreating
+any disk. Configurations written before this setting existed intentionally
+adopt the `none` default on their next `up`; operators who require the prior
+buffered behavior must add `cache: writeback` to each affected disk.
 
 All configured disks support increase-only resizing. Before applying any
 change, the tool must read the actual virtual capacity of the root disk and
@@ -1184,6 +1201,14 @@ Section 4.4.2; additional disks are independent. Templates are not
 chmod-modified or opened as writable disks. Running growth extends an LV
 before QMP `block_resize`. File growth uses QMP without invoking `qemu-img
 resize` on an image currently opened by QEMU.
+
+For each writable disk, QEMU's protocol node (`file` or `host_device`) and
+format node (`qcow2` or `raw`) receive the normalized cache policy. `none` maps
+to `cache.direct=on,cache.no-flush=off`; `writeback` maps to
+`cache.direct=off,cache.no-flush=off`. Applying the policy to the format node
+also makes automatically opened qcow2 backing chains inherit it. This guarantee
+covers VM root and additional disk data only; firmware, seed media, metadata,
+guest RAM, and unrelated host I/O are outside its scope.
 
 The generated NoCloud seed contains `meta-data`, `user-data`, and
 `network-config`. For a VM, the seed contains only its hostname, locked-
