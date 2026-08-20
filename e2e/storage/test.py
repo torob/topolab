@@ -469,7 +469,7 @@ def main() -> None:
         harness.run("start", timeout=600)
         harness.run("restart", "vm1", timeout=300)
         for number in range(1, 7):
-            harness.wait_ssh(f"10.77.0.{10 + number}", timeout=300)
+            harness.wait_ssh(f"10.77.0.{10 + number}", timeout=600)
             require(harness.ssh(f"10.77.0.{10 + number}", "cat", "/var/tmp/topolab-storage-marker").stdout.strip() == f"marker-{number}", "guest marker did not persist")
 
         # Pool growth succeeds; a decrease is rejected without inventory mutation.

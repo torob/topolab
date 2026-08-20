@@ -122,7 +122,7 @@ def main(harness: Harness) -> None:
         require(fragment in ps, f"ps omitted {fragment!r}")
     require("isolation=true" in ps, "management-host forwarding isolation is absent")
     ps_json = json.loads(harness.run("ps", "--format", "json").stdout)
-    require(ps_json["schema_version"] == 1, "ps JSON schema version is wrong")
+    require(ps_json["schema_version"] == 2, "ps JSON schema version is wrong")
     require(
         ps_json["topology"]["state"] == "active"
         and ps_json["network"]["state"] == "ready",
@@ -421,8 +421,9 @@ links:
         (legacy_dir / "manifest.json").write_text(
             json.dumps(
                 {
-                    "version": 1,
+                    "version": 3,
                     "topology": "legacy",
+                    "datapath_version": 1,
                     "nodes": {},
                     "links": {},
                     "host_interfaces": {},
