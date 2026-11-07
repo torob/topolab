@@ -15,9 +15,37 @@ import (
 var networkCommands = []string{"ip", "bridge", "tc", "nft"}
 
 const (
+	// DefaultOVMFCode and DefaultOVMFVars are the Ubuntu firmware paths. They
+	// are the fallback when no directory in FirmwareDirs holds a usable pair.
 	DefaultOVMFCode = "/usr/share/OVMF/OVMF_CODE_4M.fd"
 	DefaultOVMFVars = "/usr/share/OVMF/OVMF_VARS_4M.fd"
 )
+
+// FirmwareDirs lists, in order, the directories that may hold the OVMF code and
+// variables images: Ubuntu first, then Proxmox VE (spec.md Section 2).
+var FirmwareDirs = []string{"/usr/share/OVMF", "/usr/share/pve-edk2-firmware"}
+
+// DefaultFirmware returns the first directory's OVMF_CODE_4M.fd and
+// OVMF_VARS_4M.fd in which both are readable regular files. A code image and a
+// variables image from different directories are never combined. When no
+// directory qualifies it returns the Ubuntu paths, so that the error names the
+// standard location.
+func DefaultFirmware(stat func(string) (os.FileInfo, error)) (code, vars string) {
+	if stat == nil {
+		stat = os.Stat
+	}
+	usable := func(path string) bool {
+		info, err := stat(path)
+		return err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o444 != 0
+	}
+	for _, dir := range FirmwareDirs {
+		c, v := dir+"/OVMF_CODE_4M.fd", dir+"/OVMF_VARS_4M.fd"
+		if usable(c) && usable(v) {
+			return c, v
+		}
+	}
+	return DefaultOVMFCode, DefaultOVMFVars
+}
 
 type HelperPaths struct {
 	QEMUSystem string
@@ -88,11 +116,12 @@ func ResolveHelperPaths(requireVM bool, paths HelperPaths, lookPath func(string)
 	if paths.Xorriso, err = resolveExecutable("xorriso", paths.Xorriso, "xorriso"); err != nil {
 		return paths, err
 	}
+	defaultCode, defaultVars := DefaultFirmware(stat)
 	for _, firmware := range []struct {
 		label    string
 		value    *string
 		fallback string
-	}{{"OVMF code", &paths.OVMFCode, DefaultOVMFCode}, {"OVMF variables", &paths.OVMFVars, DefaultOVMFVars}} {
+	}{{"OVMF code", &paths.OVMFCode, defaultCode}, {"OVMF variables", &paths.OVMFVars, defaultVars}} {
 		if *firmware.value == "" {
 			*firmware.value = firmware.fallback
 		}

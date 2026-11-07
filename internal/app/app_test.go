@@ -188,11 +188,11 @@ func TestDownRejectsUnrecordedTopologyState(t *testing.T) {
 }
 
 func TestCaptureParserAllowsDocumentedLinkBeforeOptions(t *testing.T) {
-	o, err := parseCapture([]string{"lan", "--endpoint", "vm:eth0", "--direction", "egress", "--duration", "250ms", "--count", "3"})
+	o, err := ParseCaptureArgs([]string{"lan", "--endpoint", "vm:eth0", "--direction", "egress", "--duration", "250ms", "--count", "3"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if o.link != "lan" || o.endpoint != "vm:eth0" || o.direction != "egress" || o.duration != 250*time.Millisecond || o.count != 3 {
+	if o.Link != "lan" || o.Endpoint != "vm:eth0" || o.Direction != "egress" || o.Duration != 250*time.Millisecond || o.Count != 3 {
 		t.Fatalf("unexpected options: %#v", o)
 	}
 }
@@ -753,5 +753,118 @@ func TestFailedVMPreflightOccursBeforeStateOrNetworkMutation(t *testing.T) {
 	}
 	if _, err := os.Stat(base); !os.IsNotExist(err) {
 		t.Fatalf("failed preflight created state: %v", err)
+	}
+}
+
+// digestImages reports the digest it is told to for every template path.
+type digestImages struct {
+	checkpointImages
+	digest string
+}
+
+func (d *digestImages) ValidateTemplate(_ context.Context, path string) (qemu.TemplateInfo, error) {
+	return qemu.TemplateInfo{Path: path, Digest: d.digest}, nil
+}
+
+func TestValidateTemplatesChecksExpectedDigests(t *testing.T) {
+	doc := `name: lab
+templates:
+  - {name: base, path: /templates/base.qcow2}
+storages:
+  - {name: local, type: file, root_provisioning: snapshot}
+vms:
+  - name: vm
+    template: base
+    root_disk: {storage: local}
+    ssh_authorized_keys: ["` + "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl test" + `"]
+    interfaces: [{name: eth0}]
+switches: [{name: lan}]
+links:
+  - name: vm-lan
+    endpoints:
+      - {node: vm, interface: eth0}
+      - {node: lan, interface: vm}
+`
+	fsys := fakeFiles{"/templates/base.qcow2": []byte("x")}
+	cfg, _, err := config.ParseWith([]byte(doc), config.ParseOptions{BaseDir: "/", FS: fsys})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := New(nil, nil)
+	a.Images = &digestImages{digest: "aaaa"}
+	if _, err := a.validateTemplates(context.Background(), cfg); err != nil {
+		t.Fatalf("without expectations: %v", err)
+	}
+	a.TemplateDigests = map[string]string{"/templates/base.qcow2": "aaaa"}
+	if _, err := a.validateTemplates(context.Background(), cfg); err != nil {
+		t.Fatalf("matching digest: %v", err)
+	}
+	a.TemplateDigests = map[string]string{"/templates/base.qcow2": "bbbb"}
+	_, err = a.validateTemplates(context.Background(), cfg)
+	if !errors.Is(err, ErrTemplateDigest) || !strings.Contains(err.Error(), "has digest aaaa, want bbbb") {
+		t.Fatalf("mismatch err = %v", err)
+	}
+	a.TemplateDigests = map[string]string{"/other/path.qcow2": "bbbb"}
+	if _, err := a.validateTemplates(context.Background(), cfg); err != nil {
+		t.Fatalf("expectation for another path: %v", err)
+	}
+}
+
+// fakeFiles serves regular files from memory for configuration parsing.
+type fakeFiles map[string][]byte
+
+type fakeInfo struct{ size int64 }
+
+func (fakeInfo) Name() string       { return "f" }
+func (i fakeInfo) Size() int64      { return i.size }
+func (fakeInfo) Mode() os.FileMode  { return 0o444 }
+func (fakeInfo) ModTime() time.Time { return time.Time{} }
+func (fakeInfo) IsDir() bool        { return false }
+func (fakeInfo) Sys() any           { return nil }
+
+func (f fakeFiles) Stat(path string) (os.FileInfo, error) {
+	data, ok := f[path]
+	if !ok {
+		return nil, os.ErrNotExist
+	}
+	return fakeInfo{size: int64(len(data))}, nil
+}
+
+func (f fakeFiles) ReadFile(path string) ([]byte, error) {
+	data, ok := f[path]
+	if !ok {
+		return nil, os.ErrNotExist
+	}
+	return data, nil
+}
+
+func TestLockNoticeRunsOnceWhileTheTopologyLockIsHeld(t *testing.T) {
+	layoutDir, err := os.MkdirTemp("/tmp", "tlnote-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(layoutDir)
+	layout, err := state.NewLayout(layoutDir, "lab")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	holder, err := state.AcquireLock(context.Background(), layout.LockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Close()
+	notices := 0
+	a := New(nil, nil)
+	a.LockNotice = func() { notices++ }
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	if _, err := state.AcquireLockNotify(ctx, layout.LockPath, a.LockNotice); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v", err)
+	}
+	if notices != 1 {
+		t.Fatalf("notice ran %d times, want 1", notices)
 	}
 }

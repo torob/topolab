@@ -10,6 +10,12 @@ import (
 )
 
 func main() {
+	if len(os.Args) == 3 && os.Args[1] == "agent" && os.Args[2] == "--stdio" {
+		os.Exit(agentMain())
+	}
+	if len(os.Args) == 3 && os.Args[1] == "__job" {
+		os.Exit(jobMain(os.Args[2]))
+	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	if len(os.Args) > 1 && os.Args[1] == "__serial-collector" {
@@ -20,5 +26,7 @@ func main() {
 	}
 	runtime := app.New(os.Stdout, os.Stderr)
 	runtime.Stdin = os.Stdin
-	os.Exit((CLI{Runtime: runtimeAdapter{runtime}}).Execute(ctx, os.Args[1:]))
+	// Interrupt handling belongs to each runtime: the local one cancels its
+	// context, and the remote client interprets the signals itself.
+	os.Exit((CLI{Runtime: runtimeAdapter{runtime}, Remote: remoteRunner{}, Installer: agentInstaller{}}).Execute(context.Background(), os.Args[1:]))
 }

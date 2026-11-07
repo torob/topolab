@@ -89,6 +89,20 @@ type App struct {
 	ZeroBlockDevice func(string, uint64) error
 	OVMFCode        string
 	OVMFVars        string
+	// CaptureSink, when set, receives the pcapng stream of `capture` instead
+	// of a file under the working directory. The command then rejects --output
+	// and prints no file path. Remote operation streams the data to the
+	// controller through it.
+	CaptureSink func() (io.WriteCloser, error)
+	// ExecHost, when set, drives `exec` and `router exec` through the
+	// supplied descriptors and channels instead of the local terminal.
+	ExecHost *ExecHost
+	// LockNotice, when set, runs once when a lifecycle command has to wait for
+	// the topology lock.
+	LockNotice func()
+	// TemplateDigests maps a template path to the SHA-256 digest that its content
+	// must have. A file that differs fails `up` with ErrTemplateDigest.
+	TemplateDigests map[string]string
 	imagesDefault   bool
 	seedsDefault    bool
 	qemuDefault     bool
@@ -253,7 +267,7 @@ func (a *App) Run(ctx context.Context, command Command) error {
 		if err := layout.Ensure(); err != nil {
 			return err
 		}
-		lock, err := state.AcquireLock(ctx, layout.LockPath)
+		lock, err := state.AcquireLockNotify(ctx, layout.LockPath, a.LockNotice)
 		if err != nil {
 			return err
 		}
@@ -667,6 +681,10 @@ func (a *App) up(ctx context.Context, cfg *config.Config, layout state.Layout, o
 	return state.Save(layout.ManifestPath, old)
 }
 
+// ErrTemplateDigest means that a template's content differs from the digest
+// that the caller expected for its path.
+var ErrTemplateDigest = errors.New("template does not match its digest")
+
 func (a *App) validateTemplates(ctx context.Context, cfg *config.Config) (map[string]qemu.TemplateInfo, error) {
 	used := map[string]bool{}
 	for _, vm := range cfg.VMs {
@@ -681,6 +699,9 @@ func (a *App) validateTemplates(ctx context.Context, cfg *config.Config) (map[st
 		info, err := a.Images.ValidateTemplate(ctx, template.Path)
 		if err != nil {
 			return nil, fmt.Errorf("template %s: %w", name, err)
+		}
+		if want, ok := a.TemplateDigests[template.Path]; ok && want != info.Digest {
+			return nil, fmt.Errorf("template %s: %w: %s has digest %s, want %s", name, ErrTemplateDigest, template.Path, info.Digest, want)
 		}
 		out[name] = info
 	}

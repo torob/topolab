@@ -2,8 +2,6 @@ package qemu
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,7 +10,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"golang.org/x/sys/unix"
+	"github.com/torob/topolab/internal/fsx"
 )
 
 const GiB = uint64(1) << 30
@@ -80,20 +78,15 @@ func (m *ImageManager) ValidateTemplate(ctx context.Context, path string) (Templ
 	if info.BackingFilename != "" || info.FullBackingFilename != "" {
 		return TemplateInfo{}, fmt.Errorf("template %s has a backing file", path)
 	}
-	f, err := os.Open(path)
+	digest, _, err := fsx.HashFile(path)
 	if err != nil {
-		return TemplateInfo{}, err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
 		return TemplateInfo{}, err
 	}
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return TemplateInfo{}, err
 	}
-	return TemplateInfo{Path: filepath.Clean(abs), Digest: hex.EncodeToString(h.Sum(nil)), CapacityBytes: info.VirtualSize}, nil
+	return TemplateInfo{Path: filepath.Clean(abs), Digest: digest, CapacityBytes: info.VirtualSize}, nil
 }
 
 func GiBToBytes(size uint64) (uint64, error) {
@@ -132,10 +125,10 @@ func (m *ImageManager) CreateOverlay(ctx context.Context, destination string, te
 	if err := os.Chmod(tmp, 0o600); err != nil {
 		return err
 	}
-	if err := renameNoReplace(tmp, destination); err != nil {
+	if err := fsx.RenameNoReplace(tmp, destination); err != nil {
 		return err
 	}
-	return syncDir(filepath.Dir(destination))
+	return fsx.SyncDir(filepath.Dir(destination))
 }
 
 func (m *ImageManager) CreateDataDisk(ctx context.Context, destination string, capacity uint64) error {
@@ -161,10 +154,10 @@ func (m *ImageManager) CreateDataDisk(ctx context.Context, destination string, c
 	if err := os.Chmod(tmp, 0o600); err != nil {
 		return err
 	}
-	if err := renameNoReplace(tmp, destination); err != nil {
+	if err := fsx.RenameNoReplace(tmp, destination); err != nil {
 		return err
 	}
-	return syncDir(filepath.Dir(destination))
+	return fsx.SyncDir(filepath.Dir(destination))
 }
 
 // CreateCopy atomically creates a standalone sparse qcow2 image from a
@@ -201,10 +194,10 @@ func (m *ImageManager) CreateCopy(ctx context.Context, destination string, templ
 	if err := os.Chmod(tmp, 0o600); err != nil {
 		return err
 	}
-	if err := renameNoReplace(tmp, destination); err != nil {
+	if err := fsx.RenameNoReplace(tmp, destination); err != nil {
 		return err
 	}
-	return syncDir(filepath.Dir(destination))
+	return fsx.SyncDir(filepath.Dir(destination))
 }
 
 // ConvertToRaw writes a qcow2 template into an already allocated block
@@ -326,7 +319,7 @@ func CopyFileAtomic(source, destination string, mode os.FileMode) error {
 	if err := os.Rename(tmp, destination); err != nil {
 		return err
 	}
-	if err := syncDir(filepath.Dir(destination)); err != nil {
+	if err := fsx.SyncDir(filepath.Dir(destination)); err != nil {
 		return err
 	}
 	ok = true
@@ -346,21 +339,4 @@ func tempImageName(destination string) (string, error) {
 		return "", err
 	}
 	return name, nil
-}
-
-func syncDir(path string) error {
-	d, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
-}
-
-func renameNoReplace(source, destination string) error {
-	err := unix.Renameat2(unix.AT_FDCWD, source, unix.AT_FDCWD, destination, unix.RENAME_NOREPLACE)
-	if errors.Is(err, unix.EEXIST) {
-		return fmt.Errorf("destination already exists: %s", destination)
-	}
-	return err
 }

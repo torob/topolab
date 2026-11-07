@@ -6,12 +6,11 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 )
 
-func normalizeRootCACertificates(vm string, values []*RootCACertificate, baseDir string) error {
+func normalizeRootCACertificates(vm string, values []*RootCACertificate, baseDir string, fsys FileSystem) error {
 	seen := map[[sha256.Size]byte]int{}
 	for i, value := range values {
 		where := fmt.Sprintf("VM %q root_ca_certificates entry %d", vm, i)
@@ -33,14 +32,14 @@ func normalizeRootCACertificates(vm string, values []*RootCACertificate, baseDir
 				return fmt.Errorf("%s: resolve path: %w", where, err)
 			}
 			value.Path = filepath.Clean(absolute)
-			info, err := os.Stat(value.Path)
+			info, err := fsys.Stat(value.Path)
 			if err != nil {
 				return fmt.Errorf("%s path %q: %w", where, value.Path, err)
 			}
 			if !info.Mode().IsRegular() {
 				return fmt.Errorf("%s path %q is not a regular file", where, value.Path)
 			}
-			contents, err = os.ReadFile(value.Path)
+			contents, err = fsys.ReadFile(value.Path)
 			if err != nil {
 				return fmt.Errorf("%s path %q: %w", where, value.Path, err)
 			}

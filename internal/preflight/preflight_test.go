@@ -3,6 +3,7 @@ package preflight
 import (
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -136,5 +137,63 @@ func TestRuntimeUsesSelectedQEMUForCapabilityProbes(t *testing.T) {
 	}
 	if len(commands) != 2 || commands[0] != "/selected/qemu -cpu" || commands[1] != "/selected/qemu -device" {
 		t.Fatalf("capability commands = %v", commands)
+	}
+}
+
+func firmwareStat(present ...string) func(string) (os.FileInfo, error) {
+	have := map[string]bool{}
+	for _, p := range present {
+		have[p] = true
+	}
+	return func(path string) (os.FileInfo, error) {
+		if have[path] {
+			return fakeInfo{mode: 0o644}, nil
+		}
+		return nil, os.ErrNotExist
+	}
+}
+
+func TestFirmwareLookupPrefersUbuntuThenProxmoxAndNeverMixesDirectories(t *testing.T) {
+	const (
+		ubuntuCode = "/usr/share/OVMF/OVMF_CODE_4M.fd"
+		ubuntuVars = "/usr/share/OVMF/OVMF_VARS_4M.fd"
+		pveCode    = "/usr/share/pve-edk2-firmware/OVMF_CODE_4M.fd"
+		pveVars    = "/usr/share/pve-edk2-firmware/OVMF_VARS_4M.fd"
+	)
+	tests := []struct {
+		name         string
+		present      []string
+		wantC, wantV string
+	}{
+		{"ubuntu only", []string{ubuntuCode, ubuntuVars}, ubuntuCode, ubuntuVars},
+		{"proxmox only", []string{pveCode, pveVars}, pveCode, pveVars},
+		{"both: ubuntu wins", []string{pveCode, pveVars, ubuntuCode, ubuntuVars}, ubuntuCode, ubuntuVars},
+		{"ubuntu pair incomplete: proxmox pair is used whole", []string{ubuntuCode, pveCode, pveVars}, pveCode, pveVars},
+		{"no complete pair anywhere: the Ubuntu paths are named", []string{ubuntuCode, pveVars}, ubuntuCode, ubuntuVars},
+		{"nothing installed", nil, DefaultOVMFCode, DefaultOVMFVars},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, v := DefaultFirmware(firmwareStat(tt.present...))
+			if c != tt.wantC || v != tt.wantV {
+				t.Fatalf("DefaultFirmware = %s, %s; want %s, %s", c, v, tt.wantC, tt.wantV)
+			}
+		})
+	}
+
+	look := func(name string) (string, error) { return "/usr/bin/" + name, nil }
+	paths, err := ResolveHelperPaths(true, HelperPaths{}, look, firmwareStat(pveCode, pveVars))
+	if err != nil || paths.OVMFCode != pveCode || paths.OVMFVars != pveVars {
+		t.Fatalf("Proxmox host resolution = %#v, %v", paths, err)
+	}
+	// An explicit override wins; the other image still comes from the lookup.
+	explicit := HelperPaths{OVMFCode: "/custom/code.fd"}
+	paths, err = ResolveHelperPaths(true, explicit, look, firmwareStat("/custom/code.fd", pveCode, pveVars))
+	if err != nil || paths.OVMFCode != "/custom/code.fd" || paths.OVMFVars != pveVars {
+		t.Fatalf("override resolution = %#v, %v", paths, err)
+	}
+	// With no usable pair the error names the standard Ubuntu location.
+	if _, err := ResolveHelperPaths(true, HelperPaths{}, look, firmwareStat(ubuntuCode, pveVars)); err == nil || !strings.Contains(err.Error(), ubuntuVars) {
+		t.Fatalf("missing firmware error = %v", err)
 	}
 }

@@ -1,0 +1,49 @@
+# Runs on another host over SSH. `remote.ssh` is an OpenSSH destination; the
+# controller needs no root privilege. `--remote`, `--local`, and
+# TOPOLAB_REMOTE override it. See spec.md Section 12.
+name: remote
+
+remote:
+  ssh: "${TOPOLAB_REMOTE_SSH:-operator@lab01.example}"
+
+templates:
+  - name: ubuntu
+    # A path on the controller. TopoLab uploads the file once and reuses it.
+    path: "${TOPOLAB_TEMPLATE:?TOPOLAB_TEMPLATE must name a qcow2 image}"
+
+storages:
+  - {name: snapshots, type: file, root_provisioning: snapshot}
+
+management_host:
+  interfaces:
+    - name: management
+      ipv4:
+        addresses: [192.0.2.254/24]
+
+vms:
+  - name: node
+    template: ubuntu
+    root_disk: {storage: snapshots}
+    ssh_authorized_keys:
+      - "${TOPOLAB_SSH_PUBLIC_KEY:?TOPOLAB_SSH_PUBLIC_KEY must be set}"
+    interfaces:
+      - name: management
+        ipv4:
+          addresses: [192.0.2.10/24]
+
+switches:
+  - name: lan
+
+links:
+  - name: management-host
+    endpoints:
+      - node: management_host
+        interface: management
+      - node: lan
+        interface: host
+  - name: node-lan
+    endpoints:
+      - node: node
+        interface: management
+      - node: lan
+        interface: node

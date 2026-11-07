@@ -116,3 +116,34 @@ func mustStat(t *testing.T, p string) os.FileInfo {
 	}
 	return s
 }
+
+func TestAcquireLockNotifyReportsContentionOnce(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "topology.lock")
+	first, err := AcquireLock(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	waiting := 0
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Millisecond)
+	defer cancel()
+	_, err = AcquireLockNotify(ctx, path, func() { waiting++ })
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want deadline exceeded", err)
+	}
+	if waiting != 1 {
+		t.Fatalf("waiting callback ran %d times, want 1", waiting)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	free := 0
+	lock, err := AcquireLockNotify(context.Background(), path, func() { free++ })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if free != 0 {
+		t.Fatalf("callback ran %d times for an uncontended lock", free)
+	}
+}

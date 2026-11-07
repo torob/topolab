@@ -20,6 +20,11 @@ var (
 )
 
 func validateDecoded(c *Config) error {
+	if c.Remote != nil {
+		if err := ValidateDestination(c.Remote.SSH); err != nil {
+			return fmt.Errorf("remote.ssh: %w", err)
+		}
+	}
 	for _, storage := range c.Storages {
 		if storage == nil {
 			continue

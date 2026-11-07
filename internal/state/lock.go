@@ -19,16 +19,22 @@ type Lock struct {
 // can bound contention; lock acquisition itself never blocks the goroutine in
 // the kernel indefinitely.
 func AcquireLock(ctx context.Context, path string) (*Lock, error) {
-	return acquireLock(ctx, path, syscall.LOCK_EX)
+	return acquireLock(ctx, path, syscall.LOCK_EX, nil)
+}
+
+// AcquireLockNotify is AcquireLock that calls waiting once, before it polls
+// again, when another holder owns the lock.
+func AcquireLockNotify(ctx context.Context, path string, waiting func()) (*Lock, error) {
+	return acquireLock(ctx, path, syscall.LOCK_EX, waiting)
 }
 
 // AcquireSharedLock allows read-only long-lived operations such as exec to
 // coexist while making lifecycle mutation wait.
 func AcquireSharedLock(ctx context.Context, path string) (*Lock, error) {
-	return acquireLock(ctx, path, syscall.LOCK_SH)
+	return acquireLock(ctx, path, syscall.LOCK_SH, nil)
 }
 
-func acquireLock(ctx context.Context, path string, mode int) (*Lock, error) {
+func acquireLock(ctx context.Context, path string, mode int, waiting func()) (*Lock, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
@@ -38,6 +44,7 @@ func acquireLock(ctx context.Context, path string, mode int) (*Lock, error) {
 	}
 	ticker := time.NewTicker(25 * time.Millisecond)
 	defer ticker.Stop()
+	notified := false
 	for {
 		err = syscall.Flock(int(f.Fd()), mode|syscall.LOCK_NB)
 		if err == nil {
@@ -46,6 +53,10 @@ func acquireLock(ctx context.Context, path string, mode int) (*Lock, error) {
 		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
 			_ = f.Close()
 			return nil, fmt.Errorf("lock %s: %w", path, err)
+		}
+		if waiting != nil && !notified {
+			notified = true
+			waiting()
 		}
 		select {
 		case <-ctx.Done():

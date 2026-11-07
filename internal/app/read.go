@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"slices"
 	"strconv"
@@ -570,15 +571,17 @@ func counter(v *uint64) string {
 	return strconv.FormatUint(*v, 10)
 }
 
-type captureOptions struct {
-	link, endpoint, direction, output string
-	snaplen                           uint32
-	duration                          time.Duration
-	count                             uint64
+// CaptureArgs are the parsed arguments of the capture command.
+type CaptureArgs struct {
+	Link, Endpoint, Direction, Output string
+	Snaplen                           uint32
+	Duration                          time.Duration
+	Count                             uint64
 }
 
-func parseCapture(args []string) (captureOptions, error) {
-	o := captureOptions{direction: "both", snaplen: 262144}
+// ParseCaptureArgs parses and validates the arguments that follow `capture`.
+func ParseCaptureArgs(args []string) (CaptureArgs, error) {
+	o := CaptureArgs{Direction: "both", Snaplen: 262144}
 	var positional []string
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -594,33 +597,33 @@ func parseCapture(args []string) (captureOptions, error) {
 		switch arg {
 		case "--endpoint":
 			v, err = value()
-			o.endpoint = v
+			o.Endpoint = v
 		case "--direction":
 			v, err = value()
-			o.direction = v
+			o.Direction = v
 		case "--output":
 			v, err = value()
-			o.output = v
+			o.Output = v
 		case "--snaplen":
 			v, err = value()
 			n, e := strconv.ParseUint(v, 10, 32)
 			if e != nil {
 				err = errors.New("invalid --snaplen")
 			} else {
-				o.snaplen = uint32(n)
+				o.Snaplen = uint32(n)
 			}
 		case "--duration":
 			v, err = value()
 			if err == nil {
-				o.duration, err = time.ParseDuration(v)
-				if o.duration <= 0 {
+				o.Duration, err = time.ParseDuration(v)
+				if o.Duration <= 0 {
 					err = errors.New("--duration must be positive")
 				}
 			}
 		case "--count":
 			v, err = value()
-			o.count, err = strconv.ParseUint(v, 10, 64)
-			if err == nil && o.count == 0 {
+			o.Count, err = strconv.ParseUint(v, 10, 64)
+			if err == nil && o.Count == 0 {
 				err = errors.New("--count must be positive")
 			}
 		default:
@@ -637,26 +640,26 @@ func parseCapture(args []string) (captureOptions, error) {
 	if len(positional) != 1 {
 		return o, errors.New("capture requires exactly one LINK")
 	}
-	o.link = positional[0]
-	if o.endpoint == "" {
+	o.Link = positional[0]
+	if o.Endpoint == "" {
 		return o, errors.New("capture requires --endpoint NODE:INTERFACE")
 	}
-	if o.direction != "ingress" && o.direction != "egress" && o.direction != "both" {
+	if o.Direction != "ingress" && o.Direction != "egress" && o.Direction != "both" {
 		return o, errors.New("--direction requires ingress, egress, or both")
 	}
-	if o.snaplen < 64 || o.snaplen > 262144 {
+	if o.Snaplen < 64 || o.Snaplen > 262144 {
 		return o, errors.New("--snaplen must be from 64 through 262144")
 	}
 	return o, nil
 }
 
 func (a *App) capture(ctx context.Context, cfg *config.Config, layout state.Layout, m *state.Manifest, args []string) error {
-	o, err := parseCapture(args)
+	o, err := ParseCaptureArgs(args)
 	if err != nil {
 		return err
 	}
-	if _, ok := cfg.LookupLink(o.link); !ok {
-		return fmt.Errorf("unknown link %q", o.link)
+	if _, ok := cfg.LookupLink(o.Link); !ok {
+		return fmt.Errorf("unknown link %q", o.Link)
 	}
 	if m == nil {
 		return errors.New("topology is not up")
@@ -668,11 +671,11 @@ func (a *App) capture(ctx context.Context, cfg *config.Config, layout state.Layo
 	if err := a.Network.Verify(ctx, ns); err != nil {
 		return err
 	}
-	link, ok := ns.Links[o.link]
+	link, ok := ns.Links[o.Link]
 	if !ok {
-		return fmt.Errorf("link %s has no running datapath", o.link)
+		return fmt.Errorf("link %s has no running datapath", o.Link)
 	}
-	parts := strings.SplitN(o.endpoint, ":", 2)
+	parts := strings.SplitN(o.Endpoint, ":", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 		return errors.New("--endpoint must be NODE:INTERFACE")
 	}
@@ -683,37 +686,55 @@ func (a *App) capture(ctx context.Context, cfg *config.Config, layout state.Layo
 		}
 	}
 	if ep == nil {
-		return fmt.Errorf("endpoint %s does not belong to link %s", o.endpoint, o.link)
+		return fmt.Errorf("endpoint %s does not belong to link %s", o.Endpoint, o.Link)
 	}
-	f, path, err := observability.CreateCaptureFile(layout.WorkingDir, cfg.Name, o.link, o.output, a.Now())
-	if err != nil {
-		return err
-	}
+	var out io.WriteCloser
+	var path string
 	keep := false
-	defer func() {
-		if !keep {
-			_ = f.Close()
-			_ = os.Remove(path)
+	if a.CaptureSink != nil {
+		if o.Output != "" {
+			return errors.New("--output is handled by the controller in remote mode")
 		}
-	}()
+		out, err = a.CaptureSink()
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if !keep {
+				_ = out.Close()
+			}
+		}()
+	} else {
+		f, resolved, err := observability.CreateCaptureFile(layout.WorkingDir, cfg.Name, o.Link, o.Output, a.Now())
+		if err != nil {
+			return err
+		}
+		out, path = f, resolved
+		defer func() {
+			if !keep {
+				_ = f.Close()
+				_ = os.Remove(path)
+			}
+		}()
+	}
 	var desc []observability.InterfaceDescription
 	var sources []observability.PacketSource
 	add := func(dir observability.Direction, device string) error {
-		src, err := newPacketSource(device, len(desc), dir, o.snaplen)
+		src, err := newPacketSource(device, len(desc), dir, o.Snaplen)
 		if err != nil {
 			return err
 		}
 		sources = append(sources, src)
-		desc = append(desc, observability.InterfaceDescription{Name: device, Direction: dir, Comment: fmt.Sprintf("topology=%s link=%s endpoint=%s direction=%s generation=%s", cfg.Name, o.link, o.endpoint, dir, link.GenerationID)})
+		desc = append(desc, observability.InterfaceDescription{Name: device, Direction: dir, Comment: fmt.Sprintf("topology=%s link=%s endpoint=%s direction=%s generation=%s", cfg.Name, o.Link, o.Endpoint, dir, link.GenerationID)})
 		return nil
 	}
 	if err := a.Namespaces.With(ns.FabricNamespace, func() error {
-		if o.direction == "ingress" || o.direction == "both" {
+		if o.Direction == "ingress" || o.Direction == "both" {
 			if err := add(observability.Ingress, ep.IngressDevice); err != nil {
 				return err
 			}
 		}
-		if o.direction == "egress" || o.direction == "both" {
+		if o.Direction == "egress" || o.Direction == "both" {
 			if err := add(observability.Egress, ep.EgressDevice); err != nil {
 				return err
 			}
@@ -722,14 +743,14 @@ func (a *App) capture(ctx context.Context, cfg *config.Config, layout state.Layo
 	}); err != nil {
 		return err
 	}
-	w, err := observability.NewPcapNGWriter(f, o.snaplen, desc)
+	w, err := observability.NewPcapNGWriter(out, o.Snaplen, desc)
 	if err != nil {
 		return err
 	}
 	keep = true
 	if err := observability.Capture(ctx, w, sources, observability.CaptureOptions{
-		Duration: o.duration,
-		Count:    o.count,
+		Duration: o.Duration,
+		Count:    o.Count,
 		OwnershipCheck: func(checkCtx context.Context) error {
 			current, err := state.Load(layout.ManifestPath)
 			if err != nil {
@@ -745,7 +766,7 @@ func (a *App) capture(ctx context.Context, cfg *config.Config, layout state.Layo
 			if currentNetwork == nil {
 				return errors.New("managed network state was removed")
 			}
-			currentLink, ok := currentNetwork.Links[o.link]
+			currentLink, ok := currentNetwork.Links[o.Link]
 			if !ok || currentLink.GenerationID != link.GenerationID {
 				return errors.New("datapath generation changed")
 			}
@@ -754,6 +775,8 @@ func (a *App) capture(ctx context.Context, cfg *config.Config, layout state.Layo
 	}); err != nil {
 		return err
 	}
-	fmt.Fprintln(a.Stdout, path)
+	if path != "" {
+		fmt.Fprintln(a.Stdout, path)
+	}
 	return nil
 }

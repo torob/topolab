@@ -10,6 +10,7 @@ import (
 // slices; index is a disposable lookup accelerator built after decoding.
 type Config struct {
 	Name           string         `yaml:"name"`
+	Remote         *Remote        `yaml:"remote,omitempty"`
 	Templates      []*Template    `yaml:"templates"`
 	Storages       []*Storage     `yaml:"storages"`
 	ManagementHost ManagementHost `yaml:"management_host"`
