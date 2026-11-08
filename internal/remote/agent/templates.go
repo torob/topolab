@@ -6,11 +6,14 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/torob/topolab/internal/config"
 	"github.com/torob/topolab/internal/remote/blob"
 	"github.com/torob/topolab/internal/remote/wire"
 )
 
-// usedTemplates returns the references of the templates that VMs use, by name.
+// usedTemplates returns the references of the templates that VMs use and that
+// the controller uploads, by name. A template with remote: true has no
+// reference.
 func usedTemplates(p *parsed, req wire.Request) ([]wire.TemplateRef, error) {
 	byName := map[string]wire.TemplateRef{}
 	for _, t := range req.Templates {
@@ -23,6 +26,9 @@ func usedTemplates(p *parsed, req wire.Request) ([]wire.TemplateRef, error) {
 			continue
 		}
 		seen[vm.Template] = true
+		if t, ok := p.cfg.LookupTemplate(vm.Template); ok && t.Remote {
+			continue
+		}
 		ref, ok := byName[vm.Template]
 		if !ok {
 			return nil, reqErr(wire.CodeProtocolError, "template %q is used by VM %q but the request does not list it", vm.Template, vm.Name)
@@ -30,6 +36,26 @@ func usedTemplates(p *parsed, req wire.Request) ([]wire.TemplateRef, error) {
 		out = append(out, ref)
 	}
 	return out, nil
+}
+
+// checkHostTemplates validates each template with remote: true that a VM uses,
+// before any job exists (spec.md Section 12.5).
+func checkHostTemplates(p *parsed) error {
+	seen := map[string]bool{}
+	var used []*config.Template
+	for _, vm := range p.cfg.VMs {
+		if seen[vm.Template] {
+			continue
+		}
+		seen[vm.Template] = true
+		if t, ok := p.cfg.LookupTemplate(vm.Template); ok && t.Remote {
+			used = append(used, t)
+		}
+	}
+	if err := config.ValidateTemplateFiles(used); err != nil {
+		return reqErr(wire.CodeHostTemplate, "%v", err)
+	}
+	return nil
 }
 
 // applyTemplates points each listed template at its blob and returns the

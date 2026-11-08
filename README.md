@@ -147,13 +147,28 @@ interface. OVMF firmware is found under `/usr/share/OVMF/` or
 
 What runs where:
 
-- The topology file, template files, Root CA files, and interpolation variables
-  stay on the controller. Only the variables that the topology looks up are
-  sent. `--working-dir` and `WORKING_DIR` name an absolute path on the host.
+- The topology file, template files with `remote: false` (the default), Root CA
+  files, and interpolation variables stay on the controller. Only the variables
+  that the topology looks up are sent. `--working-dir` and `WORKING_DIR` name an
+  absolute path on the host.
 - Templates are uploaded to `<working_dir>/.topolab/blobs/` by SHA-256 and
   reused. An interrupted upload resumes. A later `up` sends no template bytes.
   `templates ls` lists them and `templates prune [--min-age D]` removes the
   unreferenced ones.
+- A template that is already on the host needs no upload. Set `remote: true`
+  and give the absolute path on the host. The default is `remote: false`, which
+  means that `path` is on the controller:
+
+  ```yaml
+  templates:
+    - {name: ubuntu, path: /var/lib/images/ubuntu.qcow2, remote: true}
+  ```
+
+  The controller does not read or hash the file. The agent checks it on the host
+  before `up` creates a job (`host_template_invalid` on failure) and uses it in
+  place, as local mode does, so do not change a file that existing root disks
+  depend on. Changing a template between `remote: false` and `remote: true`
+  replaces the root disks of the VMs that use it.
 - `up`, `start`, `stop`, `restart`, and `down` run as jobs on the host. A lost
   SSH connection never stops a job or the topology. The controller reconnects
   with backoff for `--reconnect-timeout` (default 2 minutes, `0` disables) and
@@ -314,7 +329,8 @@ the matching `e2e/` directory.
   additional disks, inline and file-backed Root CA trust, boot policy, and
   selected VM lifecycle operations.
 - [`remote`](examples/remote/topology.yml) shows the `remote` section: one VM
-  that runs on another host, with its template uploaded from the controller.
+  that runs on another host, with its template uploaded from the controller
+  (or read in place with `remote: true`).
 
 CI syntax-checks the Python and shell assets and normalizes all five examples
 with placeholders. It intentionally does not run privileged root/KVM E2E.

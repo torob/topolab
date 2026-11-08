@@ -106,6 +106,28 @@ def child_ssh_pids(pid: int) -> list[int]:
     return [int(item) for item in result.stdout.split()]
 
 
+REMOTE_TEMPLATE_TOPOLOGY = """\
+name: remotetemplate
+templates:
+  - {{name: base, path: {path}, remote: true}}
+storages:
+  - {{name: local, type: file, root_provisioning: snapshot}}
+vms:
+  - name: vm
+    template: base
+    root_disk: {{storage: local}}
+    ssh_authorized_keys:
+      - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl test"
+    interfaces: [{{name: eth0}}]
+switches: [{{name: lan}}]
+links:
+  - name: vm-lan
+    endpoints:
+      - {{node: vm, interface: eth0}}
+      - {{node: lan, interface: vm}}
+"""
+
+
 def main(harness: Harness) -> None:
     # `config` never contacts the host: an unreachable destination is fine.
     unreachable = subprocess.run(
@@ -160,6 +182,31 @@ def main(harness: Harness) -> None:
             harness.working_dir / ".topolab" / "jobs" / "network" / job_id / "secrets.json"
         ).exists(),
         "secrets.json remains after the job ended",
+    )
+
+    # A template with remote: true that is missing on the host fails before any job
+    # exists. The suite runs on the host, so this path is also absent here.
+    remote_template_file = harness.test_dir / "remote-template.yml"
+    remote_template_file.write_text(
+        REMOTE_TEMPLATE_TOPOLOGY.format(path=harness.test_dir / "no-such-template.qcow2")
+    )
+    command = list(remote_command(harness, "up"))
+    command[command.index("--file") + 1] = str(remote_template_file)
+    refused = subprocess.run(
+        command,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=harness.environment,
+        timeout=60,
+    )
+    require(
+        refused.returncode == 1 and "host_template_invalid" in refused.stderr,
+        f"missing remote template file was not refused: {refused.returncode} {refused.stderr!r}",
+    )
+    require(
+        not (harness.working_dir / ".topolab" / "jobs" / "remotetemplate").exists(),
+        "a job was created for a missing remote template file",
     )
 
     # Local and remote views of the same host agree.

@@ -94,9 +94,15 @@ func (s *Storage) UnmarshalYAML(node *yaml.Node) error {
 	return nil
 }
 
+// Template names a read-only qcow2 image.
 type Template struct {
 	Name string `yaml:"name"`
 	Path string `yaml:"path"`
+	// Remote says that Path names a file on the host that runs the VMs, not on
+	// the controller. Path must then be absolute. It matters only in remote
+	// mode: the controller neither reads nor uploads such a file. In local mode
+	// the host is this machine.
+	Remote bool `yaml:"remote,omitempty"`
 }
 
 type ManagementHost struct {

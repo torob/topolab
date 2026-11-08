@@ -271,6 +271,12 @@ func (c CLI) Execute(ctx context.Context, args []string) int {
 		fmt.Fprintf(c.Stderr, "topolab: %v\n", err)
 		return 1
 	}
+	// LoadTopology cannot know the mode, so it skipped the files of templates
+	// with remote: true; they are on this machine now.
+	if err := config.ValidateTemplateFiles(result.Config.HostTemplates()); err != nil {
+		fmt.Fprintf(c.Stderr, "topolab: %v\n", err)
+		return 1
+	}
 	result.WorkingDir = resolved
 	for _, warning := range result.Warnings {
 		fmt.Fprintf(c.Stderr, "warning: %s\n", warning)

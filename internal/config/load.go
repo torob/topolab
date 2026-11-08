@@ -31,18 +31,29 @@ type Result struct {
 
 // Load parses exactly one YAML document, interpolates its string values,
 // applies defaults, resolves paths, validates it, and returns a normalized
-// configuration. It never creates the working directory or runtime state.
+// configuration. It never creates the working directory or runtime state. It
+// runs on the host, so it also checks the files of templates with remote: true.
 func Load(opts LoadOptions) (*Result, error) {
 	wd, err := ResolveWorkingDir(opts.WorkingDir)
 	if err != nil {
 		return nil, err
 	}
-	return loadTopology(opts, wd)
+	result, err := loadTopology(opts, wd)
+	if err != nil {
+		return nil, err
+	}
+	if err := ValidateTemplateFiles(result.Config.HostTemplates()); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // LoadTopology loads a topology file like Load but performs no working-directory
-// check. The returned Result has an empty WorkingDir. Remote mode uses it on
-// the controller, where the working directory names a host path.
+// check and does not look for the files of templates with remote: true. The
+// returned Result has an empty WorkingDir. Remote mode uses it on the
+// controller, where the working directory and those files are on the host; a
+// caller that then runs the topology on this machine validates them with
+// ValidateTemplateFiles.
 func LoadTopology(opts LoadOptions) (*Result, error) {
 	return loadTopology(opts, "")
 }
@@ -74,7 +85,7 @@ func loadTopology(opts LoadOptions, wd string) (*Result, error) {
 			return nil, err
 		}
 	}
-	if err := ValidateTemplateFiles(cfg.Templates); err != nil {
+	if err := ValidateTemplateFiles(cfg.ControllerTemplates()); err != nil {
 		return nil, err
 	}
 	return &Result{Config: cfg, WorkingDir: wd, Warnings: warnings, Data: data, BaseDir: filepath.Dir(file)}, nil

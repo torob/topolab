@@ -28,6 +28,9 @@ func (r *Runner) prepareTemplates(inv *Invocation) (map[string]string, error) {
 		if !ok {
 			return nil, fmt.Errorf("VM %q uses unknown template %q", vm.Name, vm.Template)
 		}
+		if tmpl.Remote {
+			continue // the agent reads the host file in place (spec.md Section 12.5)
+		}
 		digest, size, err := r.DigestCache.Digest(tmpl.Path, inv.Stderr)
 		if err != nil {
 			return nil, fmt.Errorf("template %q: %w", tmpl.Name, err)

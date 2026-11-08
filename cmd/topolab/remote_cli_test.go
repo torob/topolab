@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"strings"
@@ -291,5 +292,50 @@ func TestParseReconnectTimeout(t *testing.T) {
 		if _, err := parseReconnectTimeout(in); err == nil {
 			t.Errorf("parseReconnectTimeout(%q) succeeded", in)
 		}
+	}
+}
+
+// writeQcow2 writes a minimal qcow2 header that passes template validation.
+func writeQcow2(t *testing.T) string {
+	t.Helper()
+	header := make([]byte, 64)
+	copy(header, "QFI\xfb")
+	binary.BigEndian.PutUint32(header[4:8], 3)
+	path := filepath.Join(t.TempDir(), "base.qcow2")
+	if err := os.WriteFile(path, header, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestRemoteTemplateFileIsCheckedOnlyOnTheMachineWhereItLives(t *testing.T) {
+	env := map[string]string{"WORKING_DIR": t.TempDir()}
+	missing := filepath.Join(t.TempDir(), "absent.qcow2")
+	file := writeTopology(t, "templates:\n  - {name: base, path: "+missing+", remote: true}\n")
+
+	// Remote mode: the file belongs to the host, so the controller neither reads
+	// it nor fails because it is absent here.
+	res := runCLI(t, env, 1000, "--remote", "ops@lab", "--file", file, "config")
+	if res.code != 0 || len(res.remote.invocations) != 0 || !strings.Contains(res.stdout, "remote: true") {
+		t.Fatalf("remote config: code=%d stdout=%s stderr=%s", res.code, res.stdout, res.stderr)
+	}
+	res = runCLI(t, env, 1000, "--remote", "ops@lab", "--file", file, "ps")
+	if res.code != 0 || len(res.remote.invocations) != 1 {
+		t.Fatalf("remote ps: code=%d stderr=%s", res.code, res.stderr)
+	}
+
+	// Local mode: this machine is the host, so the file is checked like `path`.
+	res = runCLI(t, env, 1000, "--local", "--file", file, "config")
+	if res.code != 1 || !strings.Contains(res.stderr, `template "base"`) {
+		t.Fatalf("local config of a missing file: code=%d stderr=%s", res.code, res.stderr)
+	}
+	res = runCLI(t, env, 0, "--local", "--file", file, "up")
+	if res.code != 1 || res.runtime.command.Name != "" {
+		t.Fatalf("local up of a missing file: code=%d ran=%q stderr=%s", res.code, res.runtime.command.Name, res.stderr)
+	}
+	good := writeTopology(t, "templates:\n  - {name: base, path: "+writeQcow2(t)+", remote: true}\n")
+	res = runCLI(t, env, 1000, "--local", "--file", good, "config")
+	if res.code != 0 || !strings.Contains(res.stdout, "remote: true") {
+		t.Fatalf("local config of a good file: code=%d stderr=%s", res.code, res.stderr)
 	}
 }

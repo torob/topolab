@@ -38,8 +38,7 @@ The following features are outside the scope of this specification:
 - a persistent agent, a network listener, or any remote transport other than
   OpenSSH;
 - controllers that are not Linux systems;
-- one topology that spans several hosts;
-- template files that are read from a path on the host in remote mode; and
+- one topology that spans several hosts; and
 - automatic restoration through systemd after host reboot.
 
 ## 2. Host contract
@@ -355,10 +354,14 @@ templates:
     path: ./templates/ubuntu.qcow2
 ```
 
-Each `templates` entry contains a unique `name` and `path`. Relative
-paths are resolved against the directory containing the topology file. Each
-path must identify an existing regular file built separately from
-`topolab`.
+Each `templates` entry contains a unique `name`, a `path`, and an optional
+boolean `remote` that defaults to `false`. With `remote: false`, a relative
+`path` is resolved against the directory containing the topology file; in remote
+mode the file is on the controller. With `remote: true`, `path` must be an
+absolute path, and it names a file on the host that runs the VMs. In local mode
+that host is this machine, so `remote` changes nothing there except the rule
+that the path is absolute. These rules do not depend on the mode. Each file must
+be an existing regular file built separately from `topolab`.
 
 Every template must use the qcow2 format and must not itself have a backing
 file. The tool validates the format before use and treats the template as a
@@ -380,6 +383,15 @@ The controller validates it, hashes it, and uploads it to the host only when the
 host does not already hold content with that digest. The manifest then records
 the host blob path as the template path (Section 12.5). The host never reads
 the controller path.
+
+In remote mode a template with `remote: true` names a file on the host. The
+controller does not read, hash, or upload it, and `config` on the controller
+does not look for it. The agent validates it on the host as this section
+requires and uses it in place, as local mode does (Section 12.5). The storage
+identity of a VM contains the template path (Section 7). A template that
+changes between `remote: false` and `remote: true` in remote mode therefore
+changes its path and replaces the root disk of every VM that uses it, also when
+the content is the same.
 
 ### 4.2.1 Storage declarations
 
@@ -1748,6 +1760,15 @@ must verify at least that:
   `down`) transfers no template byte, an interrupted upload resumes from the
   reported offset, and a corrupted transfer leaves neither a blob nor a
   partial file;
+- a template with `remote: true` is neither hashed nor uploaded by the
+  controller: `up` transfers no template byte, the root disks use the host file
+  in place, `config` in remote mode does not look for the file on the
+  controller, and a missing, unreadable, or non-qcow2 host file fails with
+  `host_template_invalid` before any job exists;
+- a template without a `path`, a template with `remote: true` and a relative
+  `path`, and a `remote` value that is not a boolean are rejected before any
+  mutation, and in local mode the file of a template with `remote: true` is
+  checked like any other template file;
 - terminating the `ssh` process during `up` does not stop the job: it ends
   `succeeded`, every VM is running, `jobs attach` replays the complete output,
   and the controller either resumes without duplicated output within
@@ -1800,9 +1821,10 @@ In remote mode the locations of inputs and outputs are:
 
 | Item | Location |
 | --- | --- |
-| Topology file, template files, Root CA files named by `path` | controller |
+| Topology file, template files with `remote: false`, Root CA files named by `path` | controller |
 | Interpolation variables | controller environment |
 | `capture --output` and the template digest cache | controller |
+| Template files with `remote: true` | host |
 | Working directory, state, disks, sockets, logs, blob store, job store | host |
 | Helper executables and firmware named by `--qemu-system`, `--ovmf-code`, and the other helper options | host |
 
@@ -1814,9 +1836,10 @@ failure as `working_dir_invalid`.
 The controller parses and validates the topology with the rules of Section 4,
 except the working-directory checks, before it contacts the host. A failure
 at this stage never reaches the host. In remote mode `config` runs only on the
-controller: it starts no `ssh` process, validates template files on the
-controller, requires a non-empty working directory but checks it only
-lexically, and prints the normalized YAML including `remote`.
+controller: it starts no `ssh` process, validates the files of templates with
+`remote: false` on the controller, does not look for the files of templates with
+`remote: true`, requires a non-empty working directory but checks it only lexically, and prints
+the normalized YAML including `remote`.
 
 ### 12.2 Transport and protocol
 
@@ -1952,8 +1975,9 @@ For each command the controller sends one request that contains:
 - the interpolation variables that the topology looked up, including the names
   that were unset, with a flag that tells whether each was set;
 - the working directory and the helper overrides;
-- for `up`, the name, SHA-256 digest, and size of each template that at least
-  one VM uses;
+- for `up`, the name, SHA-256 digest, and size of each template with
+  `remote: false` that at least one VM uses; a template with `remote: true` is
+  not listed;
 - the contents of each Root CA file that a VM names by `path`, keyed by its
   resolved controller path; and
 - for `exec` and `router exec`, the terminal size and the value of `TERM`.
@@ -1969,12 +1993,16 @@ controller refuses a larger request before it sends anything
    parses and ignores the `remote` section.
 2. It behaves as if every transferred Root CA file had the transferred contents
    at its path.
-3. For `up`, it replaces the path of each used template with its blob path
-   (Section 12.5). A used template that the request does not list is an error.
+3. For `up`, it replaces the path of each used template with `remote: false` by
+   its blob path (Section 12.5). A used template with `remote: false` that the
+   request does not list is an error. It leaves a template with `remote: true`
+   unchanged.
 4. It computes the SHA-256 of its normalized configuration and compares it with
    the value that the controller sent from its own parse, before the host
    changes in any way. A difference is a `protocol_error`.
-5. It runs the command with the semantics of Sections 3 through 10.
+5. For `up`, it checks each used template with `remote: true` on the host, as
+   Section 12.5 requires, before it creates a job.
+6. It runs the command with the semantics of Sections 3 through 10.
 
 The agent validates every request field as untrusted input. In particular, it
 takes the identity of an `exec` child only from its own environment
@@ -1982,9 +2010,10 @@ takes the identity of an `exec` child only from its own environment
 
 ### 12.5 Template transfer and blob store
 
-Template transfer applies to `up`. The controller validates every declared
-template file as Section 4.2 and `up` require, and computes the SHA-256 digest
-and size of each template that at least one VM uses. It may cache a digest
+Template transfer applies to `up` and to templates with `remote: false`. The
+controller validates every declared template file with `remote: false` as
+Section 4.2 and `up` require, and computes the SHA-256 digest and size of each
+such template that at least one VM uses. It may cache a digest
 keyed by device, inode, size, modification time, and change time. It must
 re-hash when any of those values differs, and it must check the file again after
 a transfer. A change during the transfer causes one new hash and one retry.
@@ -2041,6 +2070,21 @@ lock is busy. A blob is protected when any of these names it:
   `topologies/` (this covers overlays that exist before their manifest entry
   does); or
 - the request of a job that is not in a terminal state.
+
+A template with `remote: true` takes no part in the transfer. The controller
+does not read, hash, or list it, and the agent makes no blob for it. Before `up`
+creates a job, the agent checks each such template that at least one VM uses.
+The file must exist, must be a regular file, must be a qcow2 image without a
+backing file (Section 4.2), and must be readable by the agent. Otherwise `up`
+fails with `host_template_invalid`, creates no job, and changes nothing on the
+host.
+
+`up` then uses the file in place, as local mode does. It computes the content
+digest of the file on every `up`, and Section 7 records the host path and the
+digest. TopoLab never modifies, moves, or removes the file, and
+`templates prune` never touches it. A change of its content is a
+template-identity change (Section 7). The operator must not change a file that
+existing root disks depend on until the dependent VMs are removed.
 
 ### 12.6 Lifecycle jobs
 
@@ -2259,6 +2303,7 @@ controller prints it as `topolab: remote: <code>: <message>`. The codes are:
 | `blob_invalid` | An uploaded template is not a qcow2 file without a backing file. |
 | `blob_corrupt` | A stored blob does not match its name. |
 | `blob_no_space` | The host cannot reserve space for an upload. |
+| `host_template_invalid` | A template with `remote: true` is missing on the host, is not a regular file, is not readable, or is not a qcow2 image without a backing file. |
 
 ### 12.9 Security
 
@@ -2274,7 +2319,9 @@ its effective UID is 0 and its standard input and output are not terminals.
 
 The right to run the agent as root is equivalent to administrative control of
 every topology and every file under any working directory that the operator
-names. The operator grants it only to trusted accounts and limits it with the
+names. It also lets the account name any qcow2 file on the host as a template
+with `remote: true`, and the VMs of that topology can read the file. The operator
+grants it only to trusted accounts and limits it with the
 `sudoers` rule of Section 12.3 and with SSH key policy.
 
 Only the variables that a topology looks up leave the controller. They are not

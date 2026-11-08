@@ -82,6 +82,9 @@ func (s *session) runLifecycle(req wire.Request) (int, error) {
 	release := func() {}
 	var digests []string
 	if req.Command == "up" {
+		if err := checkHostTemplates(p); err != nil {
+			return s.reject(err)
+		}
 		refs, err := usedTemplates(p, req)
 		if err != nil {
 			return s.reject(err)

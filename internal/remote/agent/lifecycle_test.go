@@ -707,6 +707,100 @@ func TestUpNeedsEveryUsedTemplateInTheRequest(t *testing.T) {
 	}
 }
 
+// remoteTemplateRequest builds an `up` request for a topology whose only
+// template has remote: true, so its file is on the host.
+func remoteTemplateRequest(t *testing.T, lab *jobLab, hostFile string, jobN int) wire.Request {
+	t.Helper()
+	doc := strings.Replace(vmTopology, "{name: base, path: /controller/base.qcow2}", "{name: base, path: "+hostFile+", remote: true}", 1)
+	cfg, _, err := config.ParseWith([]byte(doc), config.ParseOptions{BaseDir: "/controller", FS: requestFS{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := config.Digest(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wire.Request{JobID: jobID(jobN), Command: "up", Topology: doc, BaseDir: "/controller", WorkingDir: lab.wd, ConfigDigest: digest}
+}
+
+func TestRemoteTemplateIsUsedInPlaceAndNothingIsUploaded(t *testing.T) {
+	var seen app.Command
+	var digests map[string]string
+	lab := newJobLab(t, func(_ context.Context, command app.Command, rio RunIO) error {
+		seen, digests = command, rio.TemplateDigests
+		return nil
+	})
+	file := filepath.Join(t.TempDir(), "base.qcow2")
+	if err := os.WriteFile(file, qcow2Image(strings.Repeat("host image ", 200)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	req := remoteTemplateRequest(t, lab, file, 1)
+
+	p := startAgent(t, lab.options())
+	p.handshake("")
+	if err := p.conn.WriteJSON(wire.TypeRequest, req); err != nil {
+		t.Fatal(err)
+	}
+	// No blob status frame comes first: the job output and the exit follow.
+	_, _, errMsg, exit, _ := p.collectJob()
+	if errMsg != nil || exit.Code != 0 {
+		t.Fatalf("err=%v exit=%+v", errMsg, exit)
+	}
+	tmpl := seen.Topology.Templates[0]
+	if !tmpl.Remote || tmpl.Path != file {
+		t.Fatalf("template = %+v, want path %s unchanged", tmpl, file)
+	}
+	if len(digests) != 0 {
+		t.Fatalf("template digests = %v, want none", digests)
+	}
+	if _, err := os.Stat(filepath.Join(lab.wd, ".topolab", "blobs", "sha256")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a blob directory exists: %v", err)
+	}
+	if st := lab.waitTerminal("lab", req.JobID); len(st.Templates) != 0 {
+		t.Fatalf("job templates = %v, want none", st.Templates)
+	}
+}
+
+func TestRemoteTemplateProblemsFailBeforeAnyJobExists(t *testing.T) {
+	dir := t.TempDir()
+	notQcow2 := filepath.Join(dir, "plain.img")
+	backed := filepath.Join(dir, "backed.qcow2")
+	image := qcow2Image("x")
+	binary.BigEndian.PutUint64(image[8:16], 0x20) // a backing file name offset
+	for path, data := range map[string][]byte{notQcow2: []byte(strings.Repeat("plain text ", 20)), backed: image} {
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, file := range map[string]string{
+		"missing":      filepath.Join(dir, "absent.qcow2"),
+		"directory":    dir,
+		"not a qcow2":  notQcow2,
+		"backing file": backed,
+	} {
+		t.Run(name, func(t *testing.T) {
+			lab := newJobLab(t, nil)
+			req := remoteTemplateRequest(t, lab, file, 1)
+			p := startAgent(t, lab.options())
+			p.handshake("")
+			_ = p.conn.WriteJSON(wire.TypeRequest, req)
+			_, _, errMsg, exit, _ := p.collectJob()
+			if errMsg == nil || errMsg.Code != wire.CodeHostTemplate || exit.Code != 1 {
+				t.Fatalf("err=%+v exit=%+v", errMsg, exit)
+			}
+			if !strings.Contains(errMsg.Message, `template "base"`) {
+				t.Fatalf("message %q does not name the template", errMsg.Message)
+			}
+			if _, err := lab.store().Load("lab", req.JobID); !errors.Is(err, jobs.ErrNotFound) {
+				t.Fatalf("a job was created: %v", err)
+			}
+			if lab.spawned != 0 {
+				t.Fatalf("%d runners were started", lab.spawned)
+			}
+		})
+	}
+}
+
 // --- admin commands ---
 
 func runAdminCommand(t *testing.T, lab *jobLab, command string, args ...string) (string, string, *wire.ErrorMsg, int) {

@@ -15,6 +15,10 @@ func normalize(c *Config, baseDir string, fsys FileSystem) error {
 	}
 	ensureSlices(c)
 	for _, template := range c.Templates {
+		if template.Remote {
+			template.Path = filepath.Clean(template.Path)
+			continue
+		}
 		name, path := template.Name, template.Path
 		if !filepath.IsAbs(path) {
 			path = filepath.Join(absBase, path)
@@ -148,7 +152,7 @@ func normalize(c *Config, baseDir string, fsys FileSystem) error {
 			}
 		}
 	}
-	for _, template := range c.Templates {
+	for _, template := range c.ControllerTemplates() {
 		name, path := template.Name, template.Path
 		info, err := fsys.Stat(path)
 		if err != nil {

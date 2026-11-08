@@ -20,6 +20,7 @@ const (
 	CodeBlobInvalid       = "blob_invalid"
 	CodeBlobCorrupt       = "blob_corrupt"
 	CodeBlobNoSpace       = "blob_no_space"
+	CodeHostTemplate      = "host_template_invalid"
 )
 
 // Request limits (spec.md Section 12.4).

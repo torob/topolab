@@ -9,6 +9,8 @@ remote:
 templates:
   - name: ubuntu
     # A path on the controller. TopoLab uploads the file once and reuses it.
+    # To use an image that is already on the host, give its absolute path on
+    # the host and add `remote: true`; nothing is uploaded then.
     path: "${TOPOLAB_TEMPLATE:?TOPOLAB_TEMPLATE must name a qcow2 image}"
 
 storages:
