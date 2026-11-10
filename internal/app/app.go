@@ -97,9 +97,12 @@ type App struct {
 	// ExecHost, when set, drives `exec` and `router exec` through the
 	// supplied descriptors and channels instead of the local terminal.
 	ExecHost *ExecHost
-	// LockNotice, when set, runs once when a lifecycle command has to wait for
-	// the topology lock.
+	// LockNotice runs once when a lifecycle command has to wait for the
+	// topology lock. When nil, Run writes LockWaitNotice to Stderr.
 	LockNotice func()
+	// Sleep waits for d and returns early with the context error on cancel.
+	// It runs the VM start_delay wait.
+	Sleep func(context.Context, time.Duration) error
 	// TemplateDigests maps a template path to the SHA-256 digest that its content
 	// must have. A file that differs fails `up` with ErrTemplateDigest.
 	TemplateDigests map[string]string
@@ -108,6 +111,22 @@ type App struct {
 	qemuDefault     bool
 	lvmDefault      bool
 	autoAIO         string
+}
+
+// LockWaitNotice is the line a lifecycle command writes to stderr when another
+// command, for example a running `exec`, holds the topology lock.
+const LockWaitNotice = "waiting for the topology lock"
+
+// sleepContext waits for d or until ctx ends, whichever comes first.
+func sleepContext(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func New(stdout, stderr io.Writer) *App {
@@ -169,6 +188,9 @@ func (a *App) defaults() {
 	}
 	if a.Now == nil {
 		a.Now = time.Now
+	}
+	if a.Sleep == nil {
+		a.Sleep = sleepContext
 	}
 	if a.Executable == nil {
 		a.Executable = os.Executable
@@ -267,7 +289,11 @@ func (a *App) Run(ctx context.Context, command Command) error {
 		if err := layout.Ensure(); err != nil {
 			return err
 		}
-		lock, err := state.AcquireLockNotify(ctx, layout.LockPath, a.LockNotice)
+		lockNotice := a.LockNotice
+		if lockNotice == nil {
+			lockNotice = func() { fmt.Fprintln(a.Stderr, LockWaitNotice) }
+		}
+		lock, err := state.AcquireLockNotify(ctx, layout.LockPath, lockNotice)
 		if err != nil {
 			return err
 		}
@@ -669,8 +695,9 @@ func (a *App) up(ctx context.Context, cfg *config.Config, layout state.Layout, o
 	if err := state.Save(layout.ManifestPath, old); err != nil {
 		return err
 	}
+	run := &startRun{}
 	for _, name := range cfg.VMNames() {
-		startErr := a.startNode(ctx, cfg, layout, old, name, old.Nodes[name], netState)
+		startErr := a.startNode(ctx, cfg, layout, old, name, old.Nodes[name], netState, run)
 		if err := state.Save(layout.ManifestPath, old); err != nil {
 			return err
 		}
@@ -885,8 +912,9 @@ func (a *App) start(ctx context.Context, cfg *config.Config, layout state.Layout
 			return fmt.Errorf("verify node %s storage: %w", name, err)
 		}
 	}
+	run := &startRun{}
 	for _, name := range names {
-		startErr := a.startNode(ctx, cfg, layout, m, name, m.Nodes[name], netState)
+		startErr := a.startNode(ctx, cfg, layout, m, name, m.Nodes[name], netState, run)
 		if err := state.Save(layout.ManifestPath, m); err != nil {
 			return err
 		}
@@ -949,6 +977,7 @@ func (a *App) restart(ctx context.Context, cfg *config.Config, layout state.Layo
 			return fmt.Errorf("verify node %s storage: %w", name, err)
 		}
 	}
+	run := &startRun{}
 	for _, name := range names {
 		stopErr := a.stopNode(ctx, cfg.Name, name, m.Nodes[name])
 		if err := state.Save(layout.ManifestPath, m); err != nil {
@@ -957,7 +986,7 @@ func (a *App) restart(ctx context.Context, cfg *config.Config, layout state.Layo
 		if stopErr != nil {
 			return stopErr
 		}
-		startErr := a.startNode(ctx, cfg, layout, m, name, m.Nodes[name], netState)
+		startErr := a.startNode(ctx, cfg, layout, m, name, m.Nodes[name], netState, run)
 		if err := state.Save(layout.ManifestPath, m); err != nil {
 			return err
 		}

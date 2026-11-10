@@ -177,7 +177,8 @@ syntax and precedence.
 : Require an active, ownership-validated topology and directly execute the
   supplied argv, without a shell, in its management-host network namespace.
   The command is permitted when that namespace has only loopback connectivity.
-  A shared topology lock is held for the command lifetime, so `down` waits.
+  A shared topology lock is held for the command lifetime, so `down` waits;
+  a waiting lifecycle command writes `waiting for the topology lock` to stderr.
   The child inherits stdin, stdout, stderr, TTY state, and a sanitized process
   environment. `--cwd` selects its working directory.
 
@@ -527,6 +528,7 @@ vms:
       order: [disk, network]
       menu: false
       strict: false
+    start_delay: 30s
     ssh_authorized_keys:
       - ssh-ed25519 AAAA... operator@example
     root_ca_certificates:
@@ -904,6 +906,20 @@ output, manifest, and QEMU argument generation must therefore preserve VM
 interface declaration order as well as additional-disk order. Boot changes
 require a VM restart and preserve every writable disk.
 
+`start_delay` is optional and has no default, so a VM starts at once. A value
+is a positive integer followed by `s`, `m`, or `h`, such as `30s` or `2m`.
+Other text is a configuration error. When `up`, `start`, or `restart` launches
+the VM, the tool waits for `start_delay` immediately before it launches that
+VM, and writes `waiting <delay> before starting VM <name>` to stderr. Each VM
+waits on its own delay. The first VM that a command launches never waits,
+because no earlier launch exists to space it from; its `start_delay` has no
+effect in that command. A VM that is already running is not launched, so it
+does not wait and does not count as that first launch. `restart` stops a VM
+before its wait, so the VM stays stopped during the wait. The wait holds the topology lock, and cancellation ends it at
+once without starting the VM. Because the topology YAML carries the field,
+remote mode needs no extra option. `start_delay` changes no VM hardware, so it
+needs no restart and preserves every writable disk.
+
 ### 4.5 Routers
 
 Each router runs in its own Linux network namespace and defines its interface
@@ -1278,6 +1294,15 @@ interfaces become persistent TAP devices passed to fabric-namespace QEMU with
 `script=no,downscript=no`. Router interfaces become veth pairs whose router
 endpoint is moved from fabric into the router namespace.
 
+A node linked to a switch gets a static FDB entry on the switch bridge: the
+interface MAC of the VM, router, or management host, bound to the switch-side
+port of that link. On a `vlan_filtering` switch the entry carries the access
+VLAN, or one entry for each allowed VLAN of a trunk port. Static entries do not
+age, so the switch never floods unicast frames for that MAC when the node has
+been quiet. Only the interface MAC that TopoLab configures is pinned; any other
+MAC behind a node, such as a guest bridge or a virtual router MAC, is learned
+as usual and can age out.
+
 Without an `external` interface, `up` creates no root-namespace bridge, TAP,
 veth, route, or nftables table. Namespace handles and owned processes are the
 only permitted root-visible effects. With `external`, only the documented root
@@ -1407,7 +1432,8 @@ by `templates prune`, and a job record is removed only by job retention or
 
 Only one operation may mutate a topology at a time; mutations take an
 exclusive file lock. Both management-host and router `exec` hold a shared lock
-for the full child lifetime.
+for the full child lifetime. A lifecycle command that has to wait for the lock
+writes `waiting for the topology lock` once to stderr.
 
 The version-2 manifest records a datapath version; deterministic fabric and management-
 host namespace names and ownership aliases; namespace scope for every managed

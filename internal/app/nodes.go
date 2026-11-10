@@ -416,7 +416,11 @@ func vmRootCACertificates(vm *config.VM) []string {
 	return out
 }
 
-func (a *App) startNode(ctx context.Context, cfg *config.Config, layout state.Layout, manifest *state.Manifest, name string, n *state.Node, netState *network.State) error {
+// startRun tracks the VM launches of one command. The first VM that the command
+// launches never waits for its start_delay; there is no earlier launch to space it from.
+type startRun struct{ launched bool }
+
+func (a *App) startNode(ctx context.Context, cfg *config.Config, layout state.Layout, manifest *state.Manifest, name string, n *state.Node, netState *network.State, run *startRun) error {
 	if n == nil {
 		return fmt.Errorf("node %s has no state; run up", name)
 	}
@@ -442,6 +446,15 @@ func (a *App) startNode(ctx context.Context, cfg *config.Config, layout state.La
 		}
 		return nil
 	}
+	// A VM that is not running yet waits here, before any disk or process change.
+	// The first launch of a command skips the wait.
+	if vm, ok := cfg.LookupVM(name); ok && vm.StartDelayDuration > 0 && run.launched {
+		fmt.Fprintf(a.Stderr, "waiting %s before starting VM %s\n", vm.StartDelay, name)
+		if err := a.Sleep(ctx, vm.StartDelayDuration); err != nil {
+			return err
+		}
+	}
+	run.launched = true
 	if err := a.activateNodeDisks(ctx, n); err != nil {
 		return fmt.Errorf("activate node %s disks: %w", name, err)
 	}

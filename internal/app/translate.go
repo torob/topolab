@@ -140,7 +140,7 @@ func translateEndpoint(cfg *config.Config, ep *config.Endpoint, linkMTU int) net
 		e.MTU, e.MAC = v.MTU, v.MAC
 		e.Kind = network.EndpointRouter
 	} else if s, ok := cfg.LookupSwitch(ep.Node); ok {
-		e.Kind, e.MTU = network.EndpointSwitch, s.MTU
+		e.Kind, e.MTU, e.VLANFiltering = network.EndpointSwitch, s.MTU, s.VLANFiltering
 		if ep.Port != nil {
 			e.Port.Mode, e.Port.AllowedVLANs = ep.Port.Mode, append([]int(nil), ep.Port.AllowedVLANs...)
 			if ep.Port.VLAN != nil {

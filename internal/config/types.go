@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -133,7 +134,11 @@ type VM struct {
 	SSHAuthorizedKeys  []string             `yaml:"ssh_authorized_keys"`
 	RootCACertificates []*RootCACertificate `yaml:"root_ca_certificates"`
 	Interfaces         []*VMInterface       `yaml:"interfaces"`
-	VCPUs              int                  `yaml:"-"`
+	// StartDelay is how long to wait right before this VM starts, such as
+	// "30s". Empty means no wait. Validation fills StartDelayDuration.
+	StartDelay         string        `yaml:"start_delay,omitempty"`
+	StartDelayDuration time.Duration `yaml:"-"`
+	VCPUs              int           `yaml:"-"`
 }
 
 type RootCACertificate struct {

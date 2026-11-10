@@ -473,6 +473,43 @@ func (m *Manager) attachEndpoint(ctx context.Context, topology string, link Link
 		if err := m.configureVLANPort(ctx, fabricNS, switchSide, ep.Port); err != nil {
 			return err
 		}
+		if err := m.pinPeerMAC(ctx, fabricNS, switchSide, ep, link.Endpoints[1-index]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// pinPeerMAC adds a static FDB entry on the switch bridge for the MAC of the
+// node at the other end of a switch link. Without it the bridge learns the MAC
+// from traffic only, forgets it after the ageing time, and floods unicast
+// frames to every switch port until the node sends a frame again. Only the
+// interface MAC that TopoLab knows is pinned; other MACs still use learning.
+func (m *Manager) pinPeerMAC(ctx context.Context, ns, switchSide string, sw, peer Endpoint) error {
+	switch peer.Kind {
+	case EndpointVM, EndpointRouter, EndpointManagementHost:
+	default:
+		return nil
+	}
+	if peer.MAC == "" {
+		return nil
+	}
+	base := []string{"fdb", "replace", peer.MAC, "dev", switchSide, "master", "static"}
+	if !sw.VLANFiltering {
+		_, err := m.runIn(ctx, ns, "bridge", base...)
+		return err
+	}
+	vids := []int{sw.Port.VLAN}
+	if sw.Port.Mode == "trunk" {
+		vids = append([]int(nil), sw.Port.AllowedVLANs...)
+		sort.Ints(vids)
+		vids = slices.Compact(vids)
+	}
+	for _, vid := range vids {
+		args := append(append([]string(nil), base...), "vlan", strconv.Itoa(vid))
+		if _, err := m.runIn(ctx, ns, "bridge", args...); err != nil {
+			return err
+		}
 	}
 	return nil
 }

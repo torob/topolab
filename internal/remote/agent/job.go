@@ -368,7 +368,7 @@ func RunJob(ctx context.Context, dir string, runner Runner) int {
 		Stdout:          stdout,
 		Stderr:          stderr,
 		TemplateDigests: digests,
-		LockNotice:      func() { fmt.Fprintln(stderr, "waiting for the topology lock") },
+		LockNotice:      func() { fmt.Fprintln(stderr, app.LockWaitNotice) },
 	})
 	switch {
 	case runErr == nil:

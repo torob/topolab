@@ -89,7 +89,9 @@ stdio/TTY behavior, forwards signals to the child process group, and returns
 the exact child status. The child runs as the original sudo caller by default,
 with supplementary groups and `HOME`/`USER`/`LOGNAME` reset; `--user` selects
 another local passwd entry. Root is retained only by the small supervisor that
-holds the lock and reaps the child.
+holds the lock and reaps the child. While `exec` runs, `up`, `start`, `stop`,
+`restart` and `down` wait for the lock and write `waiting for the topology lock`
+to stderr.
 
 `router exec NAME [--user USER] [--cwd DIR] -- COMMAND...` provides the same
 direct-exec, locking, stdio, TTY, signal, and exit-status behavior in a
@@ -104,6 +106,19 @@ state, datapaths, balloon observations, guest-agent availability, and router
 external interfaces. It also reports storage/VG/pool identity, provisioning,
 thin utilization and overcommit, drift, and warnings. Drift errors are separate
 fields rather than state text.
+
+`up`, `start` and `restart` launch VMs one at a time, in YAML order, and do not
+wait for the guest to boot. To start a VM later, set `start_delay` on it (a
+positive integer and `s`, `m` or `h`). TopoLab waits that long right before it
+launches the VM and writes `waiting 30s before starting VM igw` to stderr. The
+first VM that a command launches never waits. A VM that already runs does not
+wait and does not count as that first launch.
+
+```yaml
+vms:
+  - name: igw
+    start_delay: 30s
+```
 
 ## Remote operation
 

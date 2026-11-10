@@ -324,6 +324,31 @@ def main(harness: Harness) -> None:
     state = manifest["network_state"]
     bridge = state["links"]["left-lan"]["bridge"]
     fabric = state["fabric_namespace"]
+
+    # Each node linked to the switch (left, right, management_host) has a static
+    # FDB entry on VLAN 10. A static entry never ages out, so the switch does not
+    # flood unicast frames for that MAC when the node has been quiet.
+    switch_bridges = [
+        item["name"]
+        for item in state["resources"]
+        if item["kind"] == "bridge" and item["name"].startswith("tls")
+    ]
+    require(len(switch_bridges) == 1, f"expected one switch bridge: {switch_bridges}")
+    fdb = subprocess.run(
+        ("ip", "netns", "exec", fabric)
+        + ("bridge", "fdb", "show", "br", switch_bridges[0]),
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    ).stdout
+    pinned = [
+        line for line in fdb.splitlines() if "vlan 10" in line and "static" in line
+    ]
+    require(
+        len(pinned) >= 3,
+        f"switch bridge lacks static FDB entries for its nodes:\n{fdb}",
+    )
+
     subprocess.run(
         ("ip", "netns", "exec", fabric, "ip", "link", "del", "dev", bridge), check=True
     )

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -18,6 +19,8 @@ var (
 	routerIface  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,14}$`)
 	leasePattern = regexp.MustCompile(`^[1-9][0-9]*[smhdw]$`)
 	lvmName      = regexp.MustCompile(`^[A-Za-z0-9_+][A-Za-z0-9_.+-]{0,126}$`)
+	// startDelayPattern is a positive integer and one unit that time.ParseDuration accepts.
+	startDelayPattern = regexp.MustCompile(`^[1-9][0-9]*[smh]$`)
 )
 
 func validateDecoded(c *Config) error {
@@ -309,6 +312,14 @@ func validateVM(c *Config, name string, vm *VM, macs map[string]string, ips map[
 			return fmt.Errorf("VM %q boot.order duplicates %q", name, b)
 		}
 		seenBoot[b] = true
+	}
+	vm.StartDelayDuration = 0
+	if vm.StartDelay != "" {
+		d, err := time.ParseDuration(vm.StartDelay)
+		if !startDelayPattern.MatchString(vm.StartDelay) || err != nil {
+			return fmt.Errorf("VM %q start_delay must be a positive integer followed by s, m, or h", name)
+		}
+		vm.StartDelayDuration = d
 	}
 	if len(vm.SSHAuthorizedKeys) == 0 {
 		return fmt.Errorf("VM %q requires ssh_authorized_keys", name)

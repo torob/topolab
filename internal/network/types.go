@@ -119,7 +119,9 @@ type Endpoint struct {
 	Queues    int
 	Addresses []string // management-host addresses; router addresses come from Routers
 	Port      Port
-	Egress    Impairment
+	// VLANFiltering mirrors the switch setting. It is set only on switch endpoints.
+	VLANFiltering bool
+	Egress        Impairment
 }
 
 type Port struct {

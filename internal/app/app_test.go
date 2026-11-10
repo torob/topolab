@@ -868,3 +868,51 @@ func TestLockNoticeRunsOnceWhileTheTopologyLockIsHeld(t *testing.T) {
 		t.Fatalf("notice ran %d times, want 1", notices)
 	}
 }
+
+func TestRunWritesLockWaitNoticeToStderrWhenNoCallbackIsSet(t *testing.T) {
+	base, err := os.MkdirTemp("/tmp", "tlwait-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	layout, err := state.NewLayout(base, "lab")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Save(layout.ManifestPath, state.NewManifest("lab")); err != nil {
+		t.Fatal(err)
+	}
+	holder, err := state.AcquireSharedLock(context.Background(), layout.LockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Close()
+	command := Command{Name: "down", WorkingDir: base, Topology: &config.Config{Name: "lab"}}
+
+	var stderr bytes.Buffer
+	a := New(nil, &stderr)
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	if err := a.Run(ctx, command); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want deadline exceeded", err)
+	}
+	if got, want := stderr.String(), LockWaitNotice+"\n"; got != want {
+		t.Fatalf("stderr = %q, want %q", got, want)
+	}
+
+	custom := 0
+	var quiet bytes.Buffer
+	b := New(nil, &quiet)
+	b.LockNotice = func() { custom++ }
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel2()
+	if err := b.Run(ctx2, command); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want deadline exceeded", err)
+	}
+	if custom != 1 || quiet.Len() != 0 {
+		t.Fatalf("custom notice ran %d times and stderr = %q; want 1 and empty", custom, quiet.String())
+	}
+}
