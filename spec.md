@@ -753,10 +753,17 @@ have deterministic QEMU identifiers and serial numbers. Their partitioning,
 filesystems, mounting, and application use are guest responsibilities.
 
 `root_disk.cache` and each additional disk's `cache` select host caching for
-that disk. The value defaults to `none` and must be either `none` or
-`writeback`; an explicitly empty value is invalid. `none` enables direct I/O so
+that disk. The value defaults to `none` and must be `none`, `writeback`, or
+`unsafe`; an explicitly empty value is invalid. `none` enables direct I/O so
 disk data bypasses the host page cache, while `writeback` opts that disk back
-into buffered host I/O. Both modes keep flushes enabled. Direct I/O avoids
+into buffered host I/O. `none` and `writeback` keep flushes enabled.
+`unsafe` uses buffered host I/O like `writeback` and also makes QEMU ignore
+guest flush requests, which matches QEMU `cache=unsafe`: a guest flush
+completes without forcing data to stable host storage. `unsafe` is an explicit
+per-disk opt-in for disposable labs where flush latency matters more than
+durability. A host crash or power loss can lose writes that the guest saw as
+flushed and can leave the disk image inconsistent. The tool must never select
+`unsafe` as a default or fallback. Direct I/O avoids
 double caching and reduces host page-cache pressure, but can change workload
 performance and requires support from the underlying filesystem or block
 device. An unsupported direct-I/O backend must make VM startup fail clearly;
@@ -769,8 +776,8 @@ reconciliation, `auto` probes the resolved QEMU executable and running kernel,
 uses `io_uring` when the probe succeeds, and otherwise emits one warning for
 the command and uses `threads`. Explicit `io_uring` is strict and a failed
 probe is a preflight error. Explicit `threads` and `native` are passed through;
-`native` is invalid with `cache: writeback` because native AIO requires direct
-I/O. Backend-specific filesystem or device incompatibility fails VM startup
+`native` is invalid with `cache: writeback` and `cache: unsafe` because native
+AIO requires direct I/O. Backend-specific filesystem or device incompatibility fails VM startup
 instead of causing another fallback.
 
 Disk declaration order is significant. The root disk is always created and
@@ -1361,7 +1368,8 @@ resize` on an image currently opened by QEMU.
 For each writable disk, QEMU's protocol node (`file` or `host_device`) and
 format node (`qcow2` or `raw`) receive the normalized cache policy. `none` maps
 to `cache.direct=on,cache.no-flush=off`; `writeback` maps to
-`cache.direct=off,cache.no-flush=off`. Explicit qcow2 backing-chain protocol
+`cache.direct=off,cache.no-flush=off`; `unsafe` maps to
+`cache.direct=off,cache.no-flush=on`. Explicit qcow2 backing-chain protocol
 and format nodes receive the same policy. This guarantee covers VM root and
 additional disk data only; firmware, seed media, metadata, guest RAM, and
 unrelated host I/O are outside its scope.

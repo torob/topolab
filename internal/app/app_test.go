@@ -461,6 +461,30 @@ func TestDiskIOPolicyChangesOnlyAffectedVMRestartIdentity(t *testing.T) {
 	if afterRootAIO["vm1"].StorageIdentityHash != afterAdditionalAIO["vm1"].StorageIdentityHash || afterRootAIO["vm1"].RootDisk.Path != afterAdditionalAIO["vm1"].RootDisk.Path || afterRootAIO["vm1"].AdditionalDisks[0].Path != afterAdditionalAIO["vm1"].AdditionalDisks[0].Path {
 		t.Fatal("AIO changes altered storage identity")
 	}
+	for _, change := range []struct {
+		name  string
+		apply func()
+	}{
+		{"root writeback to unsafe", func() { cfg.VMs[0].RootDisk.Cache = "unsafe" }},
+		{"additional writeback to unsafe", func() { cfg.VMs[0].AdditionalDisks[0].Cache = "unsafe" }},
+		{"root unsafe to none", func() { cfg.VMs[0].RootDisk.Cache = "none" }},
+	} {
+		previous, err := New(nil, nil).desiredNodes(cfg, layout, templates)
+		if err != nil {
+			t.Fatal(err)
+		}
+		change.apply()
+		next, err := New(nil, nil).desiredNodes(cfg, layout, templates)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if previous["vm1"].RestartHash == next["vm1"].RestartHash || previous["vm2"].RestartHash != next["vm2"].RestartHash {
+			t.Fatalf("%s affected wrong restart hashes: before=%#v after=%#v", change.name, previous, next)
+		}
+		if previous["vm1"].StorageIdentityHash != next["vm1"].StorageIdentityHash || previous["vm1"].RootDisk.Path != next["vm1"].RootDisk.Path || previous["vm1"].AdditionalDisks[0].Path != next["vm1"].AdditionalDisks[0].Path {
+			t.Fatalf("%s altered storage identity", change.name)
+		}
+	}
 }
 
 func TestTranslateNetworkUsesRouterEndpoint(t *testing.T) {

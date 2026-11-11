@@ -379,10 +379,11 @@ func validateVM(c *Config, name string, vm *VM, macs map[string]string, ips map[
 }
 
 func validDiskCache(cache string) error {
-	if cache != "none" && cache != "writeback" {
-		return fmt.Errorf("cache must be none or writeback, got %q", cache)
+	switch cache {
+	case "none", "writeback", "unsafe":
+		return nil
 	}
-	return nil
+	return fmt.Errorf("cache must be none, writeback, or unsafe, got %q", cache)
 }
 
 func validDiskAIO(aio, cache string) error {

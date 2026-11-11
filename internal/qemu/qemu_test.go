@@ -108,6 +108,39 @@ func TestBuildExplicitQCOW2BackingChainUsesSameAIOAndCache(t *testing.T) {
 	}
 }
 
+func TestBuildUnsafeCacheIgnoresFlushesOnEveryLayer(t *testing.T) {
+	s := NodeSpec{Topology: "lab", Name: "vm", CPU: CPU{Model: "host", Sockets: 1, Cores: 1, Threads: 1}, Memory: Memory{MiB: 128}, Firmware: Firmware{Code: "c", Vars: "v"}, QMPPath: "q", PIDFile: "p", SerialSocket: "s", Disks: []DiskSpec{
+		{Name: "root", Path: "/overlay.qcow2", Format: "qcow2", Cache: "unsafe", AIO: "io_uring", BackingPath: "/template.qcow2"},
+		{Name: "lv", Path: "/dev/vg/lv", Format: "raw", Cache: "unsafe", AIO: "threads"},
+	}}
+	args, err := NewBuilder("").Build(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var blockdevs []string
+	for i, arg := range args {
+		if arg == "-blockdev" {
+			blockdevs = append(blockdevs, args[i+1])
+		}
+	}
+	// Backing protocol, backing format, overlay protocol, overlay format,
+	// LVM host_device, and LVM raw format nodes.
+	if len(blockdevs) != 6 {
+		t.Fatalf("blockdev arguments = %v", blockdevs)
+	}
+	for index, argument := range blockdevs {
+		if !strings.Contains(argument, ",cache.direct=off,cache.no-flush=on") || strings.Contains(argument, "cache.no-flush=off") || strings.Contains(argument, "cache.direct=on") {
+			t.Errorf("unsafe node layer %d = %q", index, argument)
+		}
+	}
+	if !strings.Contains(blockdevs[0], "filename=/template.qcow2") || !strings.Contains(blockdevs[0], "aio=io_uring") || !strings.Contains(blockdevs[1], "read-only=on") {
+		t.Fatalf("unsafe backing chain = %v", blockdevs[:2])
+	}
+	if !strings.HasPrefix(blockdevs[4], "driver=host_device,") || !strings.Contains(blockdevs[4], "aio=threads") || !strings.HasPrefix(blockdevs[5], "driver=raw,") {
+		t.Fatalf("unsafe LVM nodes = %v", blockdevs[4:])
+	}
+}
+
 func nextField(argument, prefix string) string {
 	for _, field := range strings.Split(argument, ",") {
 		if value, ok := strings.CutPrefix(field, prefix); ok {
@@ -118,8 +151,8 @@ func nextField(argument, prefix string) string {
 }
 
 func TestBuildRejectsUnsupportedDiskCachePolicy(t *testing.T) {
-	s := NodeSpec{Topology: "lab", Name: "vm", CPU: CPU{Model: "host", Sockets: 1, Cores: 1, Threads: 1}, Memory: Memory{MiB: 128}, Firmware: Firmware{Code: "c", Vars: "v"}, QMPPath: "q", PIDFile: "p", SerialSocket: "s", Disks: []DiskSpec{{Name: "root", Path: "/root.qcow2", Cache: "unsafe"}}}
-	if _, err := NewBuilder("").Build(s); err == nil || !strings.Contains(err.Error(), `disk root has unsupported cache policy "unsafe"`) {
+	s := NodeSpec{Topology: "lab", Name: "vm", CPU: CPU{Model: "host", Sockets: 1, Cores: 1, Threads: 1}, Memory: Memory{MiB: 128}, Firmware: Firmware{Code: "c", Vars: "v"}, QMPPath: "q", PIDFile: "p", SerialSocket: "s", Disks: []DiskSpec{{Name: "root", Path: "/root.qcow2", Cache: "directsync"}}}
+	if _, err := NewBuilder("").Build(s); err == nil || !strings.Contains(err.Error(), `disk root has unsupported cache policy "directsync"`) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -128,7 +161,7 @@ func TestBuildRejectsUnsupportedOrIncompatibleAIOPolicy(t *testing.T) {
 	base := NodeSpec{Topology: "lab", Name: "vm", CPU: CPU{Model: "host", Sockets: 1, Cores: 1, Threads: 1}, Memory: Memory{MiB: 128}, Firmware: Firmware{Code: "c", Vars: "v"}, QMPPath: "q", PIDFile: "p", SerialSocket: "s"}
 	for _, test := range []struct {
 		aio, cache, want string
-	}{{"auto", "none", `unsupported AIO policy "auto"`}, {"posix", "none", `unsupported AIO policy "posix"`}, {"native", "writeback", "native AIO without direct I/O"}} {
+	}{{"auto", "none", `unsupported AIO policy "auto"`}, {"posix", "none", `unsupported AIO policy "posix"`}, {"native", "writeback", "native AIO without direct I/O"}, {"native", "unsafe", "native AIO without direct I/O"}} {
 		s := base
 		s.Disks = []DiskSpec{{Name: "root", Path: "/root.qcow2", AIO: test.aio, Cache: test.cache}}
 		if _, err := NewBuilder("").Build(s); err == nil || !strings.Contains(err.Error(), test.want) {

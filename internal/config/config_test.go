@@ -361,27 +361,34 @@ func TestDiskIOPolicyNormalizationValidationAndRoundTrip(t *testing.T) {
 		t.Fatalf("round trip changed disk I/O policies: %#v", roundTripVM)
 	}
 
-	writeback := strings.Replace(withDisk, "root_disk: {storage: local}", "root_disk: {storage: local, cache: writeback}", 1)
-	writeback = strings.Replace(writeback, "size_gib: 1, storage: local}", "size_gib: 1, storage: local, cache: writeback}", 1)
-	cfg, _, err = Parse([]byte(writeback), t.TempDir(), lookup)
-	if err != nil {
-		t.Fatal(err)
-	}
-	vm, _ = cfg.LookupVM("vm")
-	if vm.RootDisk.Cache != "writeback" || vm.AdditionalDisks[0].Cache != "writeback" {
-		t.Fatalf("explicit cache policies not preserved: %#v", vm)
-	}
-	out, err = Marshal(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	roundTrip, _, err = Parse(out, t.TempDir(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	roundTripVM, _ = roundTrip.LookupVM("vm")
-	if roundTripVM.RootDisk.Cache != "writeback" || roundTripVM.AdditionalDisks[0].Cache != "writeback" {
-		t.Fatalf("round trip changed explicit cache policies: %#v", roundTripVM)
+	for _, cache := range []string{"none", "writeback", "unsafe"} {
+		t.Run("cache "+cache, func(t *testing.T) {
+			changed := strings.Replace(withDisk, "root_disk: {storage: local}", "root_disk: {storage: local, cache: "+cache+"}", 1)
+			changed = strings.Replace(changed, "size_gib: 1, storage: local}", "size_gib: 1, storage: local, cache: "+cache+"}", 1)
+			parsed, _, err := Parse([]byte(changed), t.TempDir(), lookup)
+			if err != nil {
+				t.Fatal(err)
+			}
+			parsedVM, _ := parsed.LookupVM("vm")
+			if parsedVM.RootDisk.Cache != cache || parsedVM.AdditionalDisks[0].Cache != cache {
+				t.Fatalf("explicit cache policies not preserved: %#v", parsedVM)
+			}
+			encoded, err := Marshal(parsed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Count(string(encoded), "cache: "+cache) != 2 {
+				t.Fatalf("normalized YAML omitted cache policy:\n%s", encoded)
+			}
+			roundTrip, _, err := Parse(encoded, t.TempDir(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			roundTripVM, _ := roundTrip.LookupVM("vm")
+			if roundTripVM.RootDisk.Cache != cache || roundTripVM.AdditionalDisks[0].Cache != cache {
+				t.Fatalf("round trip changed explicit cache policies: %#v", roundTripVM)
+			}
+		})
 	}
 
 	for _, aio := range []string{"auto", "io_uring", "threads", "native"} {
@@ -417,8 +424,9 @@ func TestDiskIOPolicyNormalizationValidationAndRoundTrip(t *testing.T) {
 	for _, test := range []struct {
 		name, old, replacement, want string
 	}{
-		{"root unknown", "root_disk: {storage: local}", "root_disk: {storage: local, cache: unsafe}", `root_disk: cache must be none or writeback, got "unsafe"`},
-		{"additional unknown", "size_gib: 1, storage: local}", "size_gib: 1, storage: local, cache: unsafe}", `disk "data": cache must be none or writeback, got "unsafe"`},
+		{"root unknown", "root_disk: {storage: local}", "root_disk: {storage: local, cache: directsync}", `root_disk: cache must be none, writeback, or unsafe, got "directsync"`},
+		{"additional unknown", "size_gib: 1, storage: local}", "size_gib: 1, storage: local, cache: writethrough}", `disk "data": cache must be none, writeback, or unsafe, got "writethrough"`},
+		{"uppercase unsafe", "root_disk: {storage: local}", "root_disk: {storage: local, cache: UNSAFE}", `got "UNSAFE"`},
 		{"root empty string", "root_disk: {storage: local}", "root_disk: {storage: local, cache: ''}", "cache may not be empty"},
 		{"additional null value", "size_gib: 1, storage: local}", "size_gib: 1, storage: local, cache: null}", "cache may not be empty"},
 		{"root unknown aio", "root_disk: {storage: local}", "root_disk: {storage: local, aio: posix}", `aio must be auto, io_uring, threads, or native, got "posix"`},
@@ -426,6 +434,8 @@ func TestDiskIOPolicyNormalizationValidationAndRoundTrip(t *testing.T) {
 		{"additional empty aio", "size_gib: 1, storage: local}", "size_gib: 1, storage: local, aio: ''}", "aio may not be empty"},
 		{"root null aio", "root_disk: {storage: local}", "root_disk: {storage: local, aio: null}", "aio may not be empty"},
 		{"native writeback", "root_disk: {storage: local}", "root_disk: {storage: local, cache: writeback, aio: native}", "aio native requires cache none"},
+		{"root native unsafe", "root_disk: {storage: local}", "root_disk: {storage: local, cache: unsafe, aio: native}", "root_disk: aio native requires cache none"},
+		{"additional native unsafe", "size_gib: 1, storage: local}", "size_gib: 1, storage: local, cache: unsafe, aio: native}", `disk "data": aio native requires cache none`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			changed := strings.Replace(withDisk, test.old, test.replacement, 1)

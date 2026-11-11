@@ -290,6 +290,7 @@ def vm_block(number: int, storage: str, address: str) -> str:
     key = "${TOPOLAB_SSH_PUBLIC_KEY:?set by harness}"
     data_storage = "thick-wipe" if number == 1 else "thick" if number % 3 == 1 else "thin-copy" if number % 3 == 2 else "file-copy"
     cache = ", cache: writeback" if number == 1 else ""
+    root_cache = ", cache: unsafe" if number == 3 else ""
     aio = ", aio: threads" if number == 1 else ", aio: native" if number == 4 else ""
     disks = [f"      - {{name: data-{number}, size_gib: 1, storage: {data_storage}{cache}{aio}}}"]
     if number == 2:
@@ -297,7 +298,7 @@ def vm_block(number: int, storage: str, address: str) -> str:
     return f"""  - name: vm{number}
     template: ubuntu
     memory_mb: 768
-    root_disk: {{storage: {storage}, size_gib: 4}}
+    root_disk: {{storage: {storage}, size_gib: 4{root_cache}}}
     additional_disks:
 {os.linesep.join(disks)}
     ssh_authorized_keys: [\"{key}\"]
@@ -402,8 +403,11 @@ def assert_storage_layout(harness: Harness, fixture: Fixture, auto_aio: str) -> 
             block_node = disk["block_node"]
             protocol = "host_device" if disk["format"] == "raw" else "file"
             protocol_node = "file-" + block_node.removeprefix("blk-")
-            direct = not (number == 1 and disk["name"] == "data-1")
+            cache_mode = "writeback" if number == 1 and disk["name"] == "data-1" else "unsafe" if number == 3 and disk["name"] == "root" else "none"
+            direct = cache_mode == "none"
+            no_flush = cache_mode == "unsafe"
             direct_arg = "on" if direct else "off"
+            no_flush_arg = "on" if no_flush else "off"
             aio = "threads" if number == 1 and disk["name"] == "data-1" else "native" if number == 4 and disk["name"] == "data-4" else auto_aio
             require(block_node in blockdev_by_name and blockdev_by_name[block_node].startswith(f"driver={disk['format']},"), f"QEMU format mismatch for vm{number}/{disk['name']}")
             require(protocol_node in blockdev_by_name and blockdev_by_name[protocol_node].startswith(f"driver={protocol},"), f"QEMU protocol mismatch for vm{number}/{disk['name']}")
@@ -411,9 +415,9 @@ def assert_storage_layout(harness: Harness, fixture: Fixture, auto_aio: str) -> 
             require("aio=" not in blockdev_by_name[block_node], f"QEMU format node unexpectedly contains AIO for vm{number}/{disk['name']}: {blockdev_by_name[block_node]}")
             for layer in (block_node, protocol_node):
                 argument = blockdev_by_name[layer]
-                require(f"cache.direct={direct_arg}" in argument and "cache.no-flush=off" in argument, f"QEMU argv cache mismatch for vm{number}/{disk['name']} layer {layer}: {argument}")
+                require(f"cache.direct={direct_arg}" in argument and f"cache.no-flush={no_flush_arg}" in argument, f"QEMU argv cache mismatch for vm{number}/{disk['name']} layer {layer}: {argument}")
                 cache = named_nodes[layer]["cache"]
-                require(cache["direct"] is direct and cache["no-flush"] is False, f"QMP cache mismatch for vm{number}/{disk['name']} layer {layer}: {cache}")
+                require(cache["direct"] is direct and cache["no-flush"] is no_flush, f"QMP cache mismatch for vm{number}/{disk['name']} layer {layer}: {cache}")
         if number == 1:
             template = Path(node["template_path"]).resolve()
             backing_protocols = [

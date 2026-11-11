@@ -154,13 +154,20 @@ func (b *Builder) Build(s NodeSpec) ([]string, error) {
 		if cache == "" {
 			cache = "none"
 		}
-		direct := "on"
-		if cache == "writeback" {
-			direct = "off"
-		} else if cache != "none" {
+		// unsafe matches QEMU's cache=unsafe: buffered host I/O that also
+		// ignores guest flush requests.
+		var cacheOptions string
+		switch cache {
+		case "none":
+			cacheOptions = ",cache.direct=on,cache.no-flush=off"
+		case "writeback":
+			cacheOptions = ",cache.direct=off,cache.no-flush=off"
+		case "unsafe":
+			cacheOptions = ",cache.direct=off,cache.no-flush=on"
+		default:
 			return nil, fmt.Errorf("disk %s has unsupported cache policy %q", d.Name, cache)
 		}
-		cacheOptions := ",cache.direct=" + direct + ",cache.no-flush=off"
+		direct := cache == "none"
 		aio := d.AIO
 		if aio == "" {
 			aio = "threads"
@@ -168,7 +175,7 @@ func (b *Builder) Build(s NodeSpec) ([]string, error) {
 		if aio != "threads" && aio != "native" && aio != "io_uring" {
 			return nil, fmt.Errorf("disk %s has unsupported AIO policy %q", d.Name, aio)
 		}
-		if aio == "native" && direct != "on" {
+		if aio == "native" && !direct {
 			return nil, fmt.Errorf("disk %s uses native AIO without direct I/O", d.Name)
 		}
 		aioOption := ",aio=" + aio

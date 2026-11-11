@@ -240,18 +240,27 @@ cache while keeping guest flushes enabled. Set `cache: writeback` on an
 individual disk to retain buffered host I/O for that disk. Direct I/O avoids
 double caching and host page-cache pressure, but workloads may perform
 differently and the backing filesystem or block device must support it; QEMU
-startup fails instead of silently falling back when it does not. Changing a
-disk's cache policy restarts only its VM and preserves the disk. On upgrade,
-existing configurations without `cache` intentionally switch to direct I/O on
-their next `up`; add `cache: writeback` to disks that should keep the previous
-buffered behavior.
+startup fails instead of silently falling back when it does not.
+
+Set `cache: unsafe` on a disk of a disposable lab when guest `fsync` latency
+matters more than durability, for example etcd on lab masters. It uses
+buffered host I/O like `writeback` and also makes QEMU ignore guest flush
+requests, like QEMU `cache=unsafe`: a guest flush completes at once and the
+data stays in the host page cache. A host crash or power loss can lose writes
+that the guest saw as flushed and can corrupt the disk image. TopoLab never
+selects `unsafe` on its own; set it on each disk that needs it.
+
+Changing a disk's cache policy restarts only its VM and preserves the disk.
+On upgrade, existing configurations without `cache` intentionally switch to
+direct I/O on their next `up`; add `cache: writeback` to disks that should
+keep the previous buffered behavior.
 
 Every disk also defaults to `aio: auto`. TopoLab probes the selected QEMU and
 running kernel before reconciliation, uses `io_uring` when available, and
 otherwise warns once and falls back to `threads`. Set `aio: io_uring`,
 `aio: threads`, or `aio: native` for a strict per-disk choice; an explicitly
 requested unavailable `io_uring` backend fails preflight. Native AIO requires
-`cache: none`. For qcow2 snapshot roots, the selected cache and AIO policies
+`cache: none`, so it is invalid with `writeback` and `unsafe`. For qcow2 snapshot roots, the selected cache and AIO policies
 apply to both the writable overlay and its read-only template backing chain.
 Changing `aio` restarts only the affected VM and preserves its disks.
 Existing configurations without `aio` adopt `auto` on their next `up`.
