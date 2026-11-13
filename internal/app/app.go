@@ -8,10 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/torob/topolab/internal/cloudinit"
@@ -1052,6 +1054,24 @@ func (a *App) stopNode(ctx context.Context, topology, name string, n *state.Node
 	return nil
 }
 
+// stopNodes stops all nodes at the same time and waits for all of them.
+// Each stopNode call changes only its own node. The errors keep the sorted
+// node order, so the joined error text is stable.
+func (a *App) stopNodes(ctx context.Context, topology string, nodes map[string]*state.Node) error {
+	names := slices.Sorted(maps.Keys(nodes))
+	errs := make([]error, len(names))
+	var wg sync.WaitGroup
+	for i, name := range names {
+		wg.Go(func() {
+			if err := a.stopNode(ctx, topology, name, nodes[name]); err != nil {
+				errs[i] = fmt.Errorf("stop %s: %w", name, err)
+			}
+		})
+	}
+	wg.Wait()
+	return errors.Join(errs...)
+}
+
 func stopHelper(p qemu.ProcessOps, proc *state.Process) error {
 	if !p.Alive(proc.PID) {
 		return nil
@@ -1087,10 +1107,8 @@ func (a *App) down(ctx context.Context, cfg *config.Config, layout state.Layout,
 	if err := verifyTopologyTree(layout, m); err != nil {
 		return err
 	}
-	for name, n := range m.Nodes {
-		if err := a.stopNode(ctx, cfg.Name, name, n); err != nil {
-			return err
-		}
+	if err := a.stopNodes(ctx, cfg.Name, m.Nodes); err != nil {
+		return errors.Join(err, state.Save(layout.ManifestPath, m))
 	}
 	stopHelpersErr := a.stopNamespaceHelpers(m)
 	if err := state.Save(layout.ManifestPath, m); err != nil {

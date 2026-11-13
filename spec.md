@@ -212,7 +212,7 @@ syntax and precedence.
   fails ownership validation.
 
 `down`
-: Stop QEMU VMs and helper processes, validate ownership, remove external
+: Stop QEMU VMs at the same time and helper processes, validate ownership, remove external
   root resources, router namespaces, the management-host namespace, and
   finally the fabric namespace; then remove writable
   disks, NoCloud seeds, logs, and topology state. Template images are never
@@ -1408,6 +1408,8 @@ invokes.
 VM shutdown first requests `system_powerdown` over QMP, waits up to 30
 seconds, then uses bounded TERM and KILL fallbacks. Before signaling, the tool
 verifies that the PID command line identifies the expected topology and node.
+`down` stops all VMs at the same time. It waits until each stop ends and
+records the stopped VMs in the state. Then it fails if a stop failed.
 
 ## 7. State and reconciliation
 
