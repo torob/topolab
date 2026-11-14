@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 
@@ -158,7 +159,7 @@ func vmCloudNetwork(cfg *config.Config, name string, vm *config.VM) cloudinit.Ne
 	var n cloudinit.Network
 	for _, i := range vm.Interfaces {
 		in := i.Name
-		ci := cloudinit.Interface{Name: in, MAC: i.MAC, MTU: i.MTU, IPv4: vmIPv4(i.IPv4)}
+		ci := cloudinit.Interface{Name: in, MAC: i.MAC, MTU: i.MTU, Optional: i.Optional, IPv4: vmIPv4(i.IPv4)}
 		for _, v := range i.VLANs {
 			id := v.ID
 			ci.VLANs = append(ci.VLANs, cloudinit.VLAN{ID: id, MTU: v.MTU, IPv4: vmIPv4(v.IPv4)})
@@ -166,6 +167,28 @@ func vmCloudNetwork(cfg *config.Config, name string, vm *config.VM) cloudinit.Ne
 		n.Interfaces = append(n.Interfaces, ci)
 	}
 	return n
+}
+
+// bootDNSWarnings returns one warning for each VM whose guest boot can wait
+// about 2 minutes, because no interface or VLAN that the boot waits for has
+// a DNS server. See cloudinit.Network.MayWaitForDNS.
+func bootDNSWarnings(cfg *config.Config) []string {
+	var out []string
+	for _, vm := range cfg.VMs {
+		if !vmCloudNetwork(cfg, vm.Name, vm).MayWaitForDNS() {
+			continue
+		}
+		fix := "add dns_servers to one of its interfaces, or set optional: true on each interface without dns_servers"
+		for _, iface := range vm.Interfaces {
+			if len(iface.VLANs) > 0 {
+				// A VLAN cannot be optional, so only a DNS server helps.
+				fix = "add dns_servers to one of its interfaces or VLANs"
+				break
+			}
+		}
+		out = append(out, fmt.Sprintf("VM %s has no DNS server on an interface that its boot waits for; a guest whose netplan waits for DNS, such as Ubuntu 26.04, waits about 2 minutes before it starts SSH; %s", vm.Name, fix))
+	}
+	return out
 }
 
 func vmIPv4(v *config.VMIPv4) *cloudinit.IPv4 {

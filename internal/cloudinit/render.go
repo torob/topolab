@@ -27,8 +27,44 @@ type VLAN struct {
 type Interface struct {
 	Name, MAC string
 	MTU       int
-	IPv4      *IPv4
-	VLANs     []VLAN
+	// Optional is omitted from JSON when false, so the bootstrap hash of a
+	// VM that does not set it stays the same.
+	Optional bool `json:",omitempty"`
+	IPv4     *IPv4
+	VLANs    []VLAN
+}
+
+// optional reports whether netplan marks the interface optional. The guest
+// boot does not wait for an optional interface.
+func (i Interface) optional() bool {
+	return i.Optional || (i.IPv4 == nil && len(i.VLANs) == 0)
+}
+
+// MayWaitForDNS reports whether the guest boot can wait about 2 minutes for
+// the network. netplan 1.2 (Ubuntu 26.04) runs systemd-networkd-wait-online
+// with --dns for the required links: interfaces that are not optional, and
+// every VLAN. When no required link can get a DNS server, the wait runs to
+// its timeout, and pollinate.service holds ssh.service until then. A layer
+// with dns_servers or DHCP counts as a DNS source. When every link is
+// optional, netplan does not enable the wait at all.
+func (n Network) MayWaitForDNS() bool {
+	hasDNS := func(ip *IPv4) bool { return ip != nil && (ip.DHCP || len(ip.DNSServers) > 0) }
+	required := false
+	for _, iface := range n.Interfaces {
+		if !iface.optional() {
+			required = true
+			if hasDNS(iface.IPv4) {
+				return false
+			}
+		}
+		for _, vlan := range iface.VLANs {
+			required = true
+			if hasDNS(vlan.IPv4) {
+				return false
+			}
+		}
+	}
+	return required
 }
 
 type Network struct {
@@ -114,7 +150,7 @@ func renderNetwork(n Network) ([]byte, error) {
 		b.WriteString("  " + quote(iface.Name) + ":\n")
 		b.WriteString("    match:\n      macaddress: " + quote(strings.ToLower(iface.MAC)) + "\n")
 		b.WriteString("    set-name: " + quote(iface.Name) + "\n")
-		if iface.IPv4 == nil && len(iface.VLANs) == 0 {
+		if iface.optional() {
 			b.WriteString("    optional: true\n")
 		}
 		if iface.MTU > 0 {

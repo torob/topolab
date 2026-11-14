@@ -321,6 +321,49 @@ func TestParseDefaultsInterpolationAndMarshal(t *testing.T) {
 	}
 }
 
+func TestVMInterfaceOptionalParsesAndRoundTrips(t *testing.T) {
+	key := testKey(t)
+	parse := func(doc []byte, template string) *Config {
+		t.Helper()
+		cfg, _, err := Parse(doc, t.TempDir(), func(name string) (string, bool) {
+			switch name {
+			case "IMAGE":
+				return template, true
+			case "KEY":
+				return key, true
+			}
+			return "", false
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cfg
+	}
+	doc, template := validVMDocument(t, "")
+	cfg := parse(doc, template)
+	if iface, _ := cfg.LookupVMInterface("vm", "eth0"); iface.Optional {
+		t.Fatal("optional must default to false")
+	}
+	if out, _ := Marshal(cfg); strings.Contains(string(out), "optional") {
+		t.Fatalf("normalized YAML shows the false default:\n%s", out)
+	}
+	doc = []byte(strings.Replace(string(doc), "      - name: eth0\n", "      - name: eth0\n        optional: true\n", 1))
+	cfg = parse(doc, template)
+	if iface, _ := cfg.LookupVMInterface("vm", "eth0"); !iface.Optional {
+		t.Fatal("optional: true was not parsed")
+	}
+	out, err := Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "optional: true") {
+		t.Fatalf("normalized YAML lacks optional: true:\n%s", out)
+	}
+	if again := parse(out, template); !again.VMs[0].Interfaces[0].Optional {
+		t.Fatal("optional did not survive a round trip")
+	}
+}
+
 func TestDiskIOPolicyNormalizationValidationAndRoundTrip(t *testing.T) {
 	doc, template := validVMDocument(t, "")
 	lookup := func(name string) (string, bool) {

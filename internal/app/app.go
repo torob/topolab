@@ -409,6 +409,9 @@ func (a *App) runtimePreflight(ctx context.Context, cfg *config.Config, override
 	if err := a.Preflight(preflight.Options{NeedsDNSMasq: needsDNS, RequireVM: len(cfg.VMs) > 0, Helpers: paths, HelpersResolved: len(cfg.VMs) > 0, CPUModels: cpus, DeviceModels: devices, CPUPlans: plans}); err != nil {
 		return err
 	}
+	for _, warning := range bootDNSWarnings(cfg) {
+		fmt.Fprintf(a.Stderr, "warning: %s\n", warning)
+	}
 	needsAuto, needsExplicitIOUring := false, false
 	for _, vm := range cfg.VMs {
 		for _, aio := range append([]string{vm.RootDisk.AIO}, diskAIOs(vm.AdditionalDisks)...) {

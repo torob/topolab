@@ -118,6 +118,24 @@ vms:
     start_delay: 30s
 ```
 
+Some guests wait for a DNS server at boot. Ubuntu 26.04 waits for the network
+until at least one interface or VLAN that the boot waits for has a DNS server,
+and its SSH server starts only after that wait. Without `dns_servers` (or DHCP)
+on such an interface, the wait ends at its 2-minute timeout. `up`, `start` and
+`restart` print a warning for each VM in this state. To remove the wait, add
+`dns_servers` to an interface, or set `optional: true` on each interface
+without one. The boot does not wait for an optional interface. An interface
+without `ipv4` and `vlans` is always optional, and a VLAN is never optional.
+
+```yaml
+vms:
+  - name: probe
+    interfaces:
+      - name: eth0
+        optional: true
+        ipv4: {addresses: [10.0.0.10/24]}
+```
+
 ## Explicit storage backends
 
 Every root and additional disk names a top-level storage; there is no implicit,

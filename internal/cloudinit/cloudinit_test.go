@@ -2,6 +2,7 @@ package cloudinit
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -30,6 +31,72 @@ func TestRenderDeterministicNoCloud(t *testing.T) {
 	again, _ := Render("instance", UserData{Hostname: "vm", AuthorizedKeys: []string{"ssh-ed25519 AAA key"}}, in)
 	if seed.Digest() != again.Digest() {
 		t.Fatal("digest is not deterministic")
+	}
+}
+
+func TestRenderMarksOptionalInterfaces(t *testing.T) {
+	in := Network{Interfaces: []Interface{
+		{Name: "required", MAC: "02:00:00:00:00:01", IPv4: &IPv4{Addresses: []string{"10.0.0.2/24"}}},
+		{Name: "chosen", MAC: "02:00:00:00:00:02", Optional: true, IPv4: &IPv4{Addresses: []string{"10.0.1.2/24"}}},
+		{Name: "bare", MAC: "02:00:00:00:00:03"},
+	}}
+	seed, err := Render("instance", UserData{Hostname: "vm"}, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	network := string(seed.NetworkConfig)
+	sections := map[string]string{}
+	for _, name := range []string{"required", "chosen", "bare"} {
+		start := strings.Index(network, `"`+name+`":`)
+		end := len(network)
+		for _, other := range []string{"required", "chosen", "bare"} {
+			if i := strings.Index(network, `"`+other+`":`); i > start && i < end {
+				end = i
+			}
+		}
+		sections[name] = network[start:end]
+	}
+	if strings.Contains(sections["required"], "optional: true") || !strings.Contains(sections["chosen"], "optional: true") || !strings.Contains(sections["bare"], "optional: true") {
+		t.Fatalf("optional flags are wrong:\n%s", network)
+	}
+}
+
+// The bootstrap hash is the JSON of the network. A VM that does not set
+// optional must keep the hash that it had before the field existed.
+func TestInterfaceJSONOmitsOptionalWhenFalse(t *testing.T) {
+	data, err := json.Marshal(Interface{Name: "eth0", MAC: "02:00:00:00:00:01", MTU: 1500})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != `{"Name":"eth0","MAC":"02:00:00:00:00:01","MTU":1500,"IPv4":null,"VLANs":null}` {
+		t.Fatalf("interface JSON = %s", data)
+	}
+	data, _ = json.Marshal(Interface{Name: "eth0", Optional: true})
+	if !strings.Contains(string(data), `"Optional":true`) {
+		t.Fatalf("interface JSON = %s", data)
+	}
+}
+
+func TestMayWaitForDNS(t *testing.T) {
+	static := func(dns ...string) *IPv4 { return &IPv4{Addresses: []string{"10.0.0.2/24"}, DNSServers: dns} }
+	for _, test := range []struct {
+		name string
+		in   []Interface
+		want bool
+	}{
+		{"required without DNS", []Interface{{Name: "a", IPv4: static()}}, true},
+		{"required with DNS", []Interface{{Name: "a", IPv4: static("10.0.0.1")}}, false},
+		{"required with DHCP", []Interface{{Name: "a", IPv4: &IPv4{DHCP: true}}}, false},
+		{"every interface optional", []Interface{{Name: "a", Optional: true, IPv4: static()}, {Name: "b"}}, false},
+		{"only an interface without layer 3", []Interface{{Name: "a"}}, false},
+		{"optional plus required without DNS", []Interface{{Name: "a", Optional: true, IPv4: static()}, {Name: "b", IPv4: static()}}, true},
+		{"optional without DNS plus required with DNS", []Interface{{Name: "a", Optional: true, IPv4: static()}, {Name: "b", IPv4: static("1.1.1.1")}}, false},
+		{"VLAN with DNS", []Interface{{Name: "a", IPv4: &IPv4{}, VLANs: []VLAN{{ID: 10, IPv4: static("10.0.0.1")}}}}, false},
+		{"VLAN without DNS on an optional interface", []Interface{{Name: "a", Optional: true, VLANs: []VLAN{{ID: 10, IPv4: static()}}}}, true},
+	} {
+		if got := (Network{Interfaces: test.in}).MayWaitForDNS(); got != test.want {
+			t.Errorf("%s: MayWaitForDNS = %t, want %t", test.name, got, test.want)
+		}
 	}
 }
 

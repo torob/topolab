@@ -625,13 +625,33 @@ configuration matches each base interface by MAC, assigns its configured
 interface name, and configures its VLANs, IPv4 addresses, DHCP clients, routes,
 and static DNS resolvers.
 
-VM interface and VLAN MTUs, layer-3 fields, `ssh_authorized_keys`, and
-`root_ca_certificates` are write-once bootstrap inputs, not continuously
-reconciled guest configuration.
+Each VM interface also accepts `optional`, a boolean that defaults to `false`.
+With `optional: true`, the generated network configuration marks the interface
+optional (netplan `optional: true`), so the guest boot does not wait for it.
+An interface with neither `ipv4` nor `vlans` is always optional. VLAN
+subinterfaces are never optional. The normalized configuration shows
+`optional` only when it is `true`.
+
+Some guests wait for a DNS server at boot. Ubuntu 26.04 (netplan 1.2) runs
+`systemd-networkd-wait-online --any --dns -o routable` for the required
+links: every interface that is not optional, and every VLAN. Its
+`pollinate.service` also keeps `ssh.service` from starting until that wait
+ends. When no required link has `dns_servers` or uses DHCP, the wait runs to
+its 2-minute timeout, so SSH starts about 2 minutes late on each boot. When
+every link is optional, netplan does not enable the wait. `up`, `start`, and
+`restart` print one warning for each VM in this state after preflight. The
+warning does not stop the command and does not change the generated guest
+configuration.
+
+VM interface and VLAN MTUs, layer-3 fields, interface `optional` values,
+`ssh_authorized_keys`, and `root_ca_certificates` are write-once bootstrap
+inputs, not continuously reconciled guest configuration.
 They are applied only when the VM's writable root disk is first created. The manifest
-records their normalized values and a VM-bootstrap hash. While that root
+records their normalized values and a VM-bootstrap hash. A VM that does not
+set `optional` keeps the bootstrap hash that it had before the field existed.
+While that root
 overlay exists, changing any guest MTU, address, DHCP setting, VLAN, route, DNS
-server, authorized key, or effective Root CA content or order in the topology
+server, interface `optional` value, authorized key, or effective Root CA content or order in the topology
 file is a preflight error and no runtime state may be changed. Changing only a
 Root CA source path while it still resolves to identical certificate DER is
 not a bootstrap change. The fields remain in the topology file as the

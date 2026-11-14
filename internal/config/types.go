@@ -176,13 +176,16 @@ type Boot struct {
 }
 
 type VMInterface struct {
-	Name   string    `yaml:"name"`
-	Model  string    `yaml:"model"`
-	Queues int       `yaml:"queues"`
-	MAC    string    `yaml:"mac"`
-	MTU    int       `yaml:"mtu"`
-	IPv4   *VMIPv4   `yaml:"ipv4,omitempty"`
-	VLANs  []*VMVLAN `yaml:"vlans"`
+	Name   string `yaml:"name"`
+	Model  string `yaml:"model"`
+	Queues int    `yaml:"queues"`
+	MAC    string `yaml:"mac"`
+	MTU    int    `yaml:"mtu"`
+	// Optional marks the interface netplan optional, so the guest boot does
+	// not wait for it. An interface without ipv4 and vlans is always optional.
+	Optional bool      `yaml:"optional,omitempty"`
+	IPv4     *VMIPv4   `yaml:"ipv4,omitempty"`
+	VLANs    []*VMVLAN `yaml:"vlans"`
 }
 
 type VMVLAN struct {
