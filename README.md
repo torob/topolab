@@ -183,12 +183,20 @@ apply to both the writable overlay and its read-only template backing chain.
 Changing `aio` restarts only the affected VM and preserves its disks.
 Existing configurations without `aio` adopt `auto` on their next `up`.
 
+Guest discard requests (for example `fstrim`) reach every writable disk. A file
+disk frees the discarded qcow2 clusters, and a thin LV returns the chunks to its
+pool. New file snapshot overlays use 4 KiB qcow2 subclusters
+(`extended_l2=on,cluster_size=128k`), so small guest writes do not copy a full
+cluster from the template first.
+
 LVM zeroing is opt-in. `zero_new_blocks: true` is valid only for `lvm-thin`
 and makes LVM clear newly allocated pool chunks; the setting is fixed when the
 pool is created. `wipe_on_create: true` is valid only for `lvm-thick` and makes
 TopoLab overwrite the full LV before publishing each new disk. Both default to
 `false`. Disabling them can expose stale VG data through unwritten portions of
-allocated storage. Manifest version 3 is not backward compatible; tear down an
+allocated storage. Because guest discards return thin chunks to the pool while
+VMs run, another thin LV can get those chunks; set `zero_new_blocks: true`
+when VMs must not see data that other VMs wrote. Manifest version 3 is not backward compatible; tear down an
 active topology with the previous TopoLab version before upgrading.
 
 The former top-level `host` key is intentionally unsupported. Rename it to

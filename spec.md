@@ -338,6 +338,10 @@ supplied VG, but every thin declaration owns a distinct deterministic pool.
 lazy zeroing of newly allocated thin-pool chunks and is immutable after pool
 creation. The latter controls a full-device overwrite before a newly created
 thick disk is published. Disabling either guarantee can expose stale VG data.
+Guest discard requests reach thin LVs (Section 6), so a running VM can return
+chunks to its pool, and the pool can then give those chunks to another thin LV.
+With `zero_new_blocks: false`, the unwritten part of such a chunk can show
+data that the earlier owner wrote.
 
 TopoLab resolves `lvm` only for an LVM topology and accepts `--lvm` as an
 executable override. Supplied VGs and PVs are never created or removed. It
@@ -500,7 +504,10 @@ the scope of this specification.
 `memory_mb` is the amount of RAM allocated to QEMU and the maximum memory that
 can be made available to the guest by balloon deflation. `memory_balloon` is
 optional. Its `enabled` field defaults to `false`; when disabled, `target_mb`
-must be omitted. When enabled, the tool attaches a `virtio-balloon-pci` device.
+must be omitted. When enabled, the tool attaches a `virtio-balloon-pci` device
+with free page reporting enabled (`free-page-reporting=on`), so the guest can
+give freed memory back to the host. Free page reporting needs a guest driver
+that supports it, such as Linux 5.7 or later; other guests ignore it.
 `target_mb` defaults to `memory_mb`, must be at least 128, and must not exceed
 `memory_mb`.
 
@@ -557,6 +564,11 @@ For `queues: N` where `N > 1`, the tool configures VirtIO-net with multiqueue
 enabled and `2 * N + 2` MSI-X vectors, configures the TAP backend with `N`
 queues, and passes `N` TAP file descriptors to QEMU. When vhost-net was
 selected automatically, it also passes `N` vhost file descriptors.
+
+Every `model: virtio` interface uses a receive virtqueue of 1024 entries
+(`rx_queue_size=1024`), which reduces packet drops during bursts. The transmit
+virtqueue keeps QEMU's default of 256 entries, because a larger transmit
+virtqueue needs a vhost-user backend. Other models keep their default rings.
 
 Changing an existing interface's `model` or `queues` value requires a VM
 restart and may change the interface name assigned by the guest, but it must
@@ -699,13 +711,14 @@ The supported bus values map to fixed QEMU controller and device models:
 | `bus` | QEMU presentation | Typical Linux name |
 | --- | --- | --- |
 | `scsi` | dedicated `virtio-scsi-pci` controller, dedicated IOThread, and `scsi-hd` device | `/dev/sdX` |
-| `virtio` | `virtio-blk-pci` device | `/dev/vdX` |
+| `virtio` | `virtio-blk-pci` device with a dedicated IOThread | `/dev/vdX` |
 | `sata` | `ich9-ahci` controller and `ide-hd` device | `/dev/sdX` |
 | `nvme` | `nvme` controller with one namespace backed by the disk image | `/dev/nvmeXn1` |
 | `ide` | legacy `piix3-ide` controller and `ide-hd` device | `/dev/hdX` or `/dev/sdX` |
 
 The `scsi` mapping is the VirtIO SCSI Single model: every disk receives its
-own controller and IOThread. For controller types that can host multiple
+own controller and IOThread. Every `virtio` disk also receives its own
+IOThread, so its I/O does not run in the QEMU main loop. For controller types that can host multiple
 disks, the tool assigns controller, channel, port, target, and unit addresses
 deterministically and creates additional controllers when required. The tool
 must validate controller limits, PCI-slot availability, and all generated
@@ -776,7 +789,12 @@ root-disk growth automatically should enable cloud-init `growpart` and
 `resizefs` or provide equivalent behavior.
 
 For `file`, snapshot roots are qcow2 overlays and copy roots are atomically
-published standalone sparse qcow2 images without backing files. `lvm-thick`
+published standalone sparse qcow2 images without backing files. Snapshot
+overlays use extended L2 entries and 128 KiB clusters
+(`extended_l2=on,cluster_size=128k`). Each cluster then has 32 subclusters of
+4 KiB, so a small guest write allocates only its subclusters and does not copy
+a full cluster from the template first. Existing overlays keep the format they
+were created with. `lvm-thick`
 roots are independent raw copies in fully allocated linear LVs. `lvm-thin`
 copy roots are independent thin LVs; snapshot roots share one read-only
 template LV per storage and template digest and are writable snapshots of it.
@@ -1228,7 +1246,10 @@ configuration on a generated NoCloud seed ISO.
 
 QEMU VMs use:
 
-- KVM acceleration and the `q35` machine;
+- KVM acceleration and the `q35` machine with `vmport=off`;
+- only the devices that this section lists: `-nodefaults` removes QEMU's
+  implicit VGA card, empty CD-ROM drive, and parallel port, and
+  `-no-user-config` makes QEMU ignore host QEMU configuration files;
 - the CPU model and explicit vCPU topology defined in Section 4.4;
 - the selectable disk buses and VM network-device models defined in Section
   4.4;
@@ -1260,6 +1281,11 @@ to `cache.direct=on,cache.no-flush=off`; `writeback` maps to
 and format nodes receive the same policy. This guarantee covers VM root and
 additional disk data only; firmware, seed media, metadata, guest RAM, and
 unrelated host I/O are outside its scope.
+Every writable protocol and format node also receives `discard=unmap`, because
+QEMU drops a guest discard request at the first node without it. A guest
+discard (TRIM or UNMAP) therefore frees qcow2 clusters in file disks and passes
+to the LV for LVM disks, where a thin LV returns chunks to its pool. Read-only
+backing nodes do not receive `discard=unmap`.
 The effective AIO backend is applied only to protocol nodes, where QEMU accepts
 the `aio` option. File-backed qcow2 snapshot roots use explicit deterministic,
 read-only backing format/protocol nodes rather than automatic backing-file

@@ -88,7 +88,11 @@ func (b *Builder) Build(s NodeSpec) ([]string, error) {
 	args := []string{b.Executable,
 		"-name", "guest=" + identity + ",debug-threads=on",
 		"-uuid", deterministicUUID(s.Topology + "\x00" + s.Name),
-		"-enable-kvm", "-machine", "q35,accel=kvm",
+		// Every device is explicit. -nodefaults drops QEMU's implicit VGA
+		// card, empty CD-ROM, and parallel port; -no-user-config ignores host
+		// /etc/qemu configuration. vmport=off drops the VMware I/O port.
+		"-nodefaults", "-no-user-config",
+		"-enable-kvm", "-machine", "q35,accel=kvm,vmport=off",
 		"-cpu", s.CPU.Model,
 		"-smp", fmt.Sprintf("cpus=%d,sockets=%d,cores=%d,threads=%d", vcpus64, s.CPU.Sockets, s.CPU.Cores, s.CPU.Threads),
 		"-m", strconv.FormatUint(s.Memory.MiB, 10),
@@ -114,7 +118,8 @@ func (b *Builder) Build(s NodeSpec) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		args = append(args, "-device", "virtio-balloon-pci,id=balloon0,addr="+slot)
+		// Free page reporting lets the guest give freed RAM back to the host.
+		args = append(args, "-device", "virtio-balloon-pci,id=balloon0,free-page-reporting=on,addr="+slot)
 	}
 	if s.GuestAgentSocket != "" {
 		slot, err := slots.Next()
@@ -179,13 +184,17 @@ func (b *Builder) Build(s NodeSpec) ([]string, error) {
 			return nil, fmt.Errorf("disk %s uses native AIO without direct I/O", d.Name)
 		}
 		aioOption := ",aio=" + aio
-		protocol := "driver=file,node-name=" + fileNode + ",filename=" + escapeComma(d.Path) + ",auto-read-only=on,discard=unmap" + cacheOptions + aioOption
+		// QEMU drops a guest discard at the first node without
+		// discard=unmap, so every writable layer needs it. Then guest TRIM
+		// frees qcow2 clusters and returns thin-LV chunks to the pool.
+		const discardOption = ",discard=unmap"
+		protocol := "driver=file,node-name=" + fileNode + ",filename=" + escapeComma(d.Path) + ",auto-read-only=on" + discardOption + cacheOptions + aioOption
 		if format == "raw" {
 			// LVM paths are block devices, which require QEMU's host_device
 			// protocol rather than the regular-file protocol.
-			protocol = "driver=host_device,node-name=" + fileNode + ",filename=" + escapeComma(d.Path) + cacheOptions + aioOption
+			protocol = "driver=host_device,node-name=" + fileNode + ",filename=" + escapeComma(d.Path) + discardOption + cacheOptions + aioOption
 		}
-		formatNode := "driver=" + format + ",node-name=" + d.BlockNode + ",file=" + fileNode + cacheOptions
+		formatNode := "driver=" + format + ",node-name=" + d.BlockNode + ",file=" + fileNode + discardOption + cacheOptions
 		if d.BackingPath != "" {
 			if format != "qcow2" {
 				return nil, fmt.Errorf("disk %s has a backing path with format %q", d.Name, format)
@@ -213,7 +222,10 @@ func (b *Builder) Build(s NodeSpec) ([]string, error) {
 			ioid, ctl := "io-"+id, "scsi-"+id
 			args = append(args, "-object", "iothread,id="+ioid, "-device", fmt.Sprintf("virtio-scsi-pci,id=%s,iothread=%s,addr=%s", ctl, ioid, slot), "-device", fmt.Sprintf("scsi-hd,drive=%s,bus=%s.0,channel=0,scsi-id=0,lun=0,serial=%s,id=dev-%s%s", d.BlockNode, ctl, d.Serial, id, boot))
 		case "virtio":
-			args = append(args, "-device", fmt.Sprintf("virtio-blk-pci,drive=%s,serial=%s,id=dev-%s,addr=%s%s", d.BlockNode, d.Serial, id, slot, boot))
+			// Like scsi, each virtio-blk disk gets its own IOThread so its
+			// I/O does not run in the QEMU main loop.
+			ioid := "io-" + id
+			args = append(args, "-object", "iothread,id="+ioid, "-device", fmt.Sprintf("virtio-blk-pci,drive=%s,iothread=%s,serial=%s,id=dev-%s,addr=%s%s", d.BlockNode, ioid, d.Serial, id, slot, boot))
 		case "sata":
 			ctl := "sata-" + id
 			args = append(args, "-device", fmt.Sprintf("ich9-ahci,id=%s,addr=%s", ctl, slot), "-device", fmt.Sprintf("ide-hd,drive=%s,bus=%s.0,serial=%s,id=dev-%s%s", d.BlockNode, ctl, d.Serial, id, boot))
@@ -281,6 +293,11 @@ func (b *Builder) Build(s NodeSpec) ([]string, error) {
 			return nil, err
 		}
 		dev := fmt.Sprintf("%s,netdev=%s,mac=%s,id=dev-%s,addr=%s", model, id, n.MAC, id, slot)
+		if n.Model == "virtio" {
+			// A larger RX ring drops fewer packets during bursts. A TX ring
+			// above 256 needs vhost-user, so TX keeps the default.
+			dev += ",rx_queue_size=1024"
+		}
 		if n.Queues > 1 {
 			dev += fmt.Sprintf(",mq=on,vectors=%d", 2*n.Queues+2)
 		}

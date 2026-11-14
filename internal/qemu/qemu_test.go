@@ -31,11 +31,67 @@ func TestBuildArgs(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := strings.Join(args, " ")
-	for _, want := range []string{"q35,accel=kvm", "cpus=2,sockets=1,cores=2,threads=1", "virtio-scsi-pci", "nvme,drive=", "serial=topolab-", "fds=3:4", "vhostfds=5:6", "mq=on,vectors=6", "bootindex=1001", "virtio-balloon-pci", "id=seed"} {
+	for _, want := range []string{"q35,accel=kvm,vmport=off", "cpus=2,sockets=1,cores=2,threads=1", "virtio-scsi-pci", "nvme,drive=", "serial=topolab-", "fds=3:4", "vhostfds=5:6", "mq=on,vectors=6", "bootindex=1001", "virtio-balloon-pci,id=balloon0,free-page-reporting=on,", "id=seed"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("missing %q in %s", want, joined)
 		}
 	}
+	for _, want := range []string{"-nodefaults", "-no-user-config"} {
+		if !containsArg(args, want) {
+			t.Errorf("missing argument %q in %s", want, joined)
+		}
+	}
+	if nic := argAfter(args, "-device", "virtio-net-pci,"); !strings.Contains(nic, ",rx_queue_size=1024") || strings.Contains(nic, "tx_queue_size") {
+		t.Errorf("virtio NIC device = %q", nic)
+	}
+}
+
+func TestBuildKeepsDefaultRingForNonVirtioNIC(t *testing.T) {
+	s := NodeSpec{Topology: "l", Name: "n", CPU: CPU{Model: "host", Sockets: 1, Cores: 1, Threads: 1}, Memory: Memory{MiB: 128}, Firmware: Firmware{Code: "c", Vars: "v"}, QMPPath: "q", PIDFile: "p", SerialSocket: "s", NICs: []NICSpec{{Name: "n", Model: "e1000e", MAC: "02:00:00:00:00:01", TAP: "tap", Queues: 1}}}
+	args, err := NewBuilder("").Build(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nic := argAfter(args, "-device", "e1000e,"); nic == "" || strings.Contains(nic, "queue_size") {
+		t.Fatalf("e1000e device = %q", nic)
+	}
+}
+
+func TestBuildGivesEachVirtioBlkDiskItsOwnIOThread(t *testing.T) {
+	s := NodeSpec{Topology: "l", Name: "n", CPU: CPU{Model: "host", Sockets: 1, Cores: 1, Threads: 1}, Memory: Memory{MiB: 128}, Firmware: Firmware{Code: "c", Vars: "v"}, QMPPath: "q", PIDFile: "p", SerialSocket: "s", Disks: []DiskSpec{{Name: "root", Path: "/root.qcow2", Bus: "virtio"}, {Name: "data", Path: "/data.qcow2", Bus: "virtio"}}}
+	args, err := NewBuilder("").Build(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"root", "data"} {
+		ioid := "io-" + ID("disk", name)
+		if !containsArg(args, "iothread,id="+ioid) {
+			t.Errorf("missing IOThread object %s in %v", ioid, args)
+		}
+		device := argAfter(args, "-device", "virtio-blk-pci,drive=blk-"+ID("disk", name)+",")
+		if !strings.Contains(device, ",iothread="+ioid+",") {
+			t.Errorf("virtio-blk device for %s = %q", name, device)
+		}
+	}
+}
+
+func containsArg(args []string, want string) bool {
+	for _, arg := range args {
+		if arg == want {
+			return true
+		}
+	}
+	return false
+}
+
+// argAfter returns the first value of option whose text starts with prefix.
+func argAfter(args []string, option, prefix string) string {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == option && strings.HasPrefix(args[i+1], prefix) {
+			return args[i+1]
+		}
+	}
+	return ""
 }
 
 func TestBuildUsesQCOW2ForFilesAndRawForLVM(t *testing.T) {
@@ -76,6 +132,13 @@ func TestBuildUsesQCOW2ForFilesAndRawForLVM(t *testing.T) {
 	if !strings.Contains(blockdevs[0], "aio=io_uring") || strings.Contains(blockdevs[1], "aio=") || !strings.Contains(blockdevs[2], "aio=threads") || strings.Contains(blockdevs[3], "aio=") {
 		t.Fatalf("AIO was not confined to protocol nodes: %v", blockdevs)
 	}
+	// A guest discard must pass every writable layer: file and qcow2 for the
+	// file disk, host_device and raw for the LVM disk.
+	for index, argument := range blockdevs {
+		if !strings.Contains(argument, ",discard=unmap") {
+			t.Errorf("writable node layer %d does not pass discards: %q", index, argument)
+		}
+	}
 }
 
 func TestBuildExplicitQCOW2BackingChainUsesSameAIOAndCache(t *testing.T) {
@@ -105,6 +168,10 @@ func TestBuildExplicitQCOW2BackingChainUsesSameAIOAndCache(t *testing.T) {
 	backingName := nextField(blockdevs[1], "node-name=")
 	if backingName == "" || !strings.Contains(blockdevs[3], "backing="+backingName) || strings.Contains(blockdevs[3], "aio=") {
 		t.Fatalf("overlay format node = %q, backing name %q", blockdevs[3], backingName)
+	}
+	// The overlay passes discards; the read-only template chain does not.
+	if !strings.Contains(blockdevs[2], ",discard=unmap") || !strings.Contains(blockdevs[3], ",discard=unmap") || strings.Contains(blockdevs[0], "discard=") || strings.Contains(blockdevs[1], "discard=") {
+		t.Fatalf("discard options = %v", blockdevs)
 	}
 }
 
@@ -225,8 +292,39 @@ func TestCreateCopyIsAtomicStandaloneQCOW2(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := strings.Join(commands, "\n")
-	if !strings.Contains(joined, "convert -f qcow2 -O qcow2 -S 4k /template.qcow2") || strings.Contains(joined, " -b ") {
+	// Out-of-order writes would fragment a qcow2 file, so the copy keeps
+	// sequential writes.
+	if !strings.Contains(joined, "convert -f qcow2 -O qcow2 -S 4k /template.qcow2") || strings.Contains(joined, " -b ") || strings.Contains(joined, "-W") {
 		t.Fatalf("copy commands = %s", joined)
+	}
+}
+
+func TestCreateOverlayUsesSubclusters(t *testing.T) {
+	destination := t.TempDir() + "/root.qcow2"
+	var command string
+	manager := NewImageManager(runnerFunc(func(_ context.Context, name string, args ...string) ([]byte, error) {
+		command = strings.Join(args, " ")
+		return nil, os.WriteFile(args[len(args)-2], []byte("qcow"), 0o600)
+	}), "qemu-img")
+	if err := manager.CreateOverlay(context.Background(), destination, TemplateInfo{Path: "/template.qcow2", CapacityBytes: 1 << 30}, 2<<30); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(command, "create -f qcow2 -o extended_l2=on,cluster_size=128k -F qcow2 -b /template.qcow2 ") || !strings.HasSuffix(command, " 2147483648") {
+		t.Fatalf("overlay command = %s", command)
+	}
+}
+
+func TestConvertToRawAllowsOutOfOrderWrites(t *testing.T) {
+	var command string
+	manager := NewImageManager(runnerFunc(func(_ context.Context, name string, args ...string) ([]byte, error) {
+		command = strings.Join(args, " ")
+		return nil, nil
+	}), "qemu-img")
+	if err := manager.ConvertToRaw(context.Background(), "/template.qcow2", "/dev/vg/lv"); err != nil {
+		t.Fatal(err)
+	}
+	if command != "convert -W -f qcow2 -O raw -S 4k /template.qcow2 /dev/vg/lv" {
+		t.Fatalf("raw convert command = %s", command)
 	}
 }
 

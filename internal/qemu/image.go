@@ -103,6 +103,11 @@ func GiBToBytes(size uint64) (uint64, error) {
 	return size * GiB, nil
 }
 
+// overlayOptions gives snapshot overlays 128 KiB clusters with 32 subclusters
+// of 4 KiB. A small write to an unallocated area then allocates only its
+// subclusters and does not copy a full cluster from the template first.
+const overlayOptions = "extended_l2=on,cluster_size=128k"
+
 // CreateOverlay atomically creates a qcow2 overlay with an absolute backing
 // path. An existing destination is never overwritten.
 func (m *ImageManager) CreateOverlay(ctx context.Context, destination string, template TemplateInfo, capacity uint64) error {
@@ -122,7 +127,7 @@ func (m *ImageManager) CreateOverlay(ctx context.Context, destination string, te
 		return err
 	}
 	defer os.Remove(tmp)
-	args := []string{"create", "-f", "qcow2", "-F", "qcow2", "-b", template.Path, tmp}
+	args := []string{"create", "-f", "qcow2", "-o", overlayOptions, "-F", "qcow2", "-b", template.Path, tmp}
 	if capacity != 0 {
 		args = append(args, fmt.Sprintf("%d", capacity))
 	}
@@ -209,8 +214,10 @@ func (m *ImageManager) CreateCopy(ctx context.Context, destination string, templ
 
 // ConvertToRaw writes a qcow2 template into an already allocated block
 // device. The destination is explicit and is never created or removed here.
+// -W allows out-of-order writes. qemu-img recommends it only for preallocated
+// raw block devices, so CreateCopy, which writes a qcow2 file, does not use it.
 func (m *ImageManager) ConvertToRaw(ctx context.Context, source, destination string) error {
-	_, err := m.Runner.Run(ctx, m.QEMUImg, "convert", "-f", "qcow2", "-O", "raw", "-S", "4k", source, destination)
+	_, err := m.Runner.Run(ctx, m.QEMUImg, "convert", "-W", "-f", "qcow2", "-O", "raw", "-S", "4k", source, destination)
 	return err
 }
 
