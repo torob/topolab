@@ -6,7 +6,6 @@ import (
 	"math"
 	"net"
 	"net/netip"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -24,19 +23,6 @@ var (
 )
 
 func validateDecoded(c *Config) error {
-	if c.Remote != nil {
-		if err := ValidateDestination(c.Remote.SSH); err != nil {
-			return fmt.Errorf("remote.ssh: %w", err)
-		}
-	}
-	for _, template := range c.Templates {
-		if template == nil {
-			continue
-		}
-		if err := validateTemplateSource(template); err != nil {
-			return err
-		}
-	}
 	for _, storage := range c.Storages {
 		if storage == nil {
 			continue
@@ -65,19 +51,6 @@ func validateDecoded(c *Config) error {
 				return fmt.Errorf("VM %q must specify all of cpu.sockets, cpu.cores, and cpu.threads", name)
 			}
 		}
-	}
-	return nil
-}
-
-// validateTemplateSource checks that a template has a path and that the path of
-// a remote template is absolute. The rules do not depend on the mode, so a
-// topology that is valid in one mode is valid in the other.
-func validateTemplateSource(t *Template) error {
-	if t.Path == "" {
-		return fmt.Errorf("template %q requires a path", t.Name)
-	}
-	if t.Remote && (!filepath.IsAbs(t.Path) || strings.ContainsRune(t.Path, 0)) {
-		return fmt.Errorf("template %q has remote: true, so its path %q must be absolute", t.Name, t.Path)
 	}
 	return nil
 }

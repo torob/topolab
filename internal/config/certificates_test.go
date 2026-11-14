@@ -132,7 +132,7 @@ func TestRootCACertificateValidation(t *testing.T) {
 	}
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
-			err := normalizeRootCACertificates("vm", tt.values, t.TempDir(), OSFileSystem())
+			err := normalizeRootCACertificates("vm", tt.values, t.TempDir())
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("error = %v, want %q", err, tt.want)
 			}
@@ -140,17 +140,17 @@ func TestRootCACertificateValidation(t *testing.T) {
 	}
 
 	directory := t.TempDir()
-	if err := normalizeRootCACertificates("vm", []*RootCACertificate{{Path: directory}}, t.TempDir(), OSFileSystem()); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+	if err := normalizeRootCACertificates("vm", []*RootCACertificate{{Path: directory}}, t.TempDir()); err == nil || !strings.Contains(err.Error(), "not a regular file") {
 		t.Fatalf("directory error = %v", err)
 	}
 	duplicatePath := filepath.Join(t.TempDir(), "root.pem")
 	if err := os.WriteFile(duplicatePath, []byte(rootPEM), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := normalizeRootCACertificates("vm", []*RootCACertificate{{PEM: rootPEM}, {Path: duplicatePath}}, t.TempDir(), OSFileSystem()); err == nil || !strings.Contains(err.Error(), "duplicates entry 0") {
+	if err := normalizeRootCACertificates("vm", []*RootCACertificate{{PEM: rootPEM}, {Path: duplicatePath}}, t.TempDir()); err == nil || !strings.Contains(err.Error(), "duplicates entry 0") {
 		t.Fatalf("cross-source duplicate error = %v", err)
 	}
-	if err := normalizeRootCACertificates("vm", []*RootCACertificate{{PEM: expiredPEM}}, t.TempDir(), OSFileSystem()); err != nil {
+	if err := normalizeRootCACertificates("vm", []*RootCACertificate{{PEM: expiredPEM}}, t.TempDir()); err != nil {
 		t.Fatalf("validity dates must not be checked: %v", err)
 	}
 }
@@ -160,7 +160,7 @@ func TestRootCACertificateRejectsInvalidSelfSignature(t *testing.T) {
 	block, _ := pem.Decode([]byte(value))
 	block.Bytes[len(block.Bytes)-1] ^= 1
 	corrupt := string(pem.EncodeToMemory(block))
-	err := normalizeRootCACertificates("vm", []*RootCACertificate{{PEM: corrupt}}, t.TempDir(), OSFileSystem())
+	err := normalizeRootCACertificates("vm", []*RootCACertificate{{PEM: corrupt}}, t.TempDir())
 	if err == nil || !strings.Contains(err.Error(), "valid self-signature") {
 		t.Fatalf("error = %v", err)
 	}

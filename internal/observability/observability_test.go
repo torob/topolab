@@ -142,36 +142,3 @@ func TestCaptureFailsWhenOwnershipChanges(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
-
-// writeRecorder remembers every Write call separately.
-type writeRecorder struct{ writes [][]byte }
-
-func (r *writeRecorder) Write(p []byte) (int, error) {
-	r.writes = append(r.writes, append([]byte(nil), p...))
-	return len(p), nil
-}
-
-func TestPcapNGWritesEachBlockWithOneWrite(t *testing.T) {
-	var rec writeRecorder
-	w, err := NewPcapNGWriter(&rec, 64, []InterfaceDescription{{Name: "a", Direction: Ingress}, {Name: "b", Direction: Egress}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := w.WritePacket(Packet{Interface: 1, Direction: Egress, Timestamp: time.Unix(5, 6), Data: make([]byte, 61)}); err != nil {
-		t.Fatal(err)
-	}
-	// One section header, two interface descriptions, and one packet block.
-	if len(rec.writes) != 4 {
-		t.Fatalf("got %d writes, want 4", len(rec.writes))
-	}
-	for i, block := range rec.writes {
-		if len(block) < 12 || len(block)%4 != 0 {
-			t.Fatalf("write %d has length %d", i, len(block))
-		}
-		total := binary.LittleEndian.Uint32(block[4:8])
-		trailer := binary.LittleEndian.Uint32(block[len(block)-4:])
-		if int(total) != len(block) || trailer != total {
-			t.Fatalf("write %d is not one whole block: total=%d trailer=%d len=%d", i, total, trailer, len(block))
-		}
-	}
-}

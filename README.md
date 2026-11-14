@@ -3,9 +3,8 @@
 [![CI](https://github.com/torob/topolab/actions/workflows/ci.yml/badge.svg)](https://github.com/torob/topolab/actions/workflows/ci.yml)
 
 TopoLab is a Linux-only declarative infrastructure-lab runner for simulating
-corporate environments with QEMU/KVM virtual machines, namespace-backed
-routers, switched networks, and Linux network namespaces. It runs on the KVM
-host itself or, from a Linux controller, on a remote host over SSH. Networking is the
+corporate environments with local QEMU/KVM virtual machines, namespace-backed
+routers, switched networks, and Linux network namespaces. Networking is the
 fabric of a lab, not its only purpose: the resulting isolated, reproducible
 infrastructure can be used to test Ansible playbooks, Kubernetes clusters and
 operators, deployment automation, distributed services, and failure or
@@ -29,8 +28,7 @@ This produces a stripped, statically linked binary at `bin/topolab`.
 
 ## Host requirements
 
-TopoLab supports Ubuntu 24.04, Ubuntu 26.04, and Proxmox VE 9 hosts with x86-64
-hardware virtualization. Runtime
+TopoLab supports Linux hosts with x86-64 hardware virtualization. Runtime
 commands require effective UID 0. VM topologies additionally require read/write
 access to `/dev/kvm`; router-only topologies skip VM-only host checks. The
 read-only `config` and `version` commands do not require root.
@@ -120,86 +118,6 @@ vms:
     start_delay: 30s
 ```
 
-## Remote operation
-
-`topolab --remote user@host COMMAND` runs a command on another KVM host. The
-controller is an ordinary Linux account: it needs no root, KVM, or QEMU, only an
-OpenSSH client. On the host, an agent (the same `topolab` executable) does the
-work, so namespaces, TAP devices, QEMU, and state stay on one machine. There is
-no daemon and no listener; every command starts one agent over SSH.
-
-Select the host with `--remote DESTINATION`, the `TOPOLAB_REMOTE` variable, or
-a `remote` section in the topology file. `--local` overrides all three.
-
-```yaml
-remote:
-  ssh: operator@lab01.example   # or ssh://user@host:port, or a Host alias
-```
-
-```sh
-# Once per build: install this executable on the host as the agent.
-topolab --remote operator@lab01.example agent install
-
-WORKING_DIR=/var/lib/lab topolab --remote operator@lab01.example -f topology.yml up
-WORKING_DIR=/var/lib/lab topolab --remote operator@lab01.example -f topology.yml ps
-WORKING_DIR=/var/lib/lab topolab --remote operator@lab01.example -f topology.yml \
-  router exec edge -- ip route show
-```
-
-The SSH account must be root, or it must be allowed to run the agent as root
-without a password. TopoLab never edits `sudoers`. A `privilege_denied` error
-prints the rule for your build. It gives that account root-equivalent control:
-
-```text
-operator ALL=(root) NOPASSWD: /usr/local/lib/topolab/<sha256>/topolab agent --stdio
-```
-
-Proxmox VE does not install `sudo`; use a root account or install `sudo` and
-the rule. TopoLab runs beside Proxmox, not inside it: it does not use `qm`, the
-Proxmox API, or Proxmox storage, and its VMs do not appear in the Proxmox
-interface. OVMF firmware is found under `/usr/share/OVMF/` or
-`/usr/share/pve-edk2-firmware/`.
-
-What runs where:
-
-- The topology file, template files with `remote: false` (the default), Root CA
-  files, and interpolation variables stay on the controller. Only the variables
-  that the topology looks up are sent. `--working-dir` and `WORKING_DIR` name an
-  absolute path on the host.
-- Templates are uploaded to `<working_dir>/.topolab/blobs/` by SHA-256 and
-  reused. An interrupted upload resumes. A later `up` sends no template bytes.
-  `templates ls` lists them and `templates prune [--min-age D]` removes the
-  unreferenced ones.
-- A template that is already on the host needs no upload. Set `remote: true`
-  and give the absolute path on the host. The default is `remote: false`, which
-  means that `path` is on the controller:
-
-  ```yaml
-  templates:
-    - {name: ubuntu, path: /var/lib/images/ubuntu.qcow2, remote: true}
-  ```
-
-  The controller does not read or hash the file. The agent checks it on the host
-  before `up` creates a job (`host_template_invalid` on failure) and uses it in
-  place, as local mode does, so do not change a file that existing root disks
-  depend on. Changing a template between `remote: false` and `remote: true`
-  replaces the root disks of the VMs that use it.
-- `up`, `start`, `stop`, `restart`, and `down` run as jobs on the host. A lost
-  SSH connection never stops a job or the topology. The controller reconnects
-  with backoff for `--reconnect-timeout` (default 2 minutes, `0` disables) and
-  then exits with status 3. Use `jobs ls`, `jobs show ID`, `jobs attach ID`,
-  `jobs cancel ID`, and `jobs prune` to follow them. The first Ctrl-C cancels a
-  job; a second one, or SIGTERM, detaches without cancelling.
-- `exec` and `router exec` use a pseudo-terminal when the controller has a
-  terminal, and return the child's exact exit status. `capture` writes its
-  pcapng file on the controller.
-- `config` and `version` never contact the host.
-
-Pass SSH options with `--ssh-opt OPTION` (for example
-`--ssh-opt ProxyJump=bastion`). TopoLab runs `ssh` with host-key checking as
-your configuration defines it and never weakens it. The protocol and the
-guarantees are in [`spec.md`](spec.md) Section 12.
-
 ## Explicit storage backends
 
 Every root and additional disk names a top-level storage; there is no implicit,
@@ -275,8 +193,7 @@ active topology with the previous TopoLab version before upgrading.
 
 The former top-level `host` key is intentionally unsupported. Rename it to
 `management_host`; if the topology is active under the legacy root datapath,
-run `down` with the new binary before the next `up`. The optional `remote`
-section is unrelated to it.
+run `down` with the new binary before the next `up`.
 
 ## Development
 
@@ -303,15 +220,7 @@ sudo python3 e2e/routed/test.py
 sudo python3 e2e/services/test.py
 sudo python3 e2e/vm-features/test.py
 sudo python3 e2e/storage/test.py
-sudo python3 e2e/remote/test.py
 ```
-
-The remote suite drives the router-only network example through SSH to this
-machine. Set `TOPOLAB_E2E_REMOTE` to the destination (default `localhost`) and
-`TOPOLAB_E2E_SSH_OPTS` to comma-separated `ssh -o` options. The account must be
-root or have the `NOPASSWD` rule shown above. The suite installs the agent for
-the build under `/usr/local/lib/topolab/`. An opt-in Go test runs the controller
-through a real `sshd`: `TOPOLAB_TEST_SSHD=1 go test -run TestRealSSHTransport ./cmd/topolab`.
 
 The VM suites automatically download the official Ubuntu 26.04 amd64 cloud
 image from pinned release `20260720`, verify its SHA-256, and cache it under
@@ -352,11 +261,8 @@ the matching `e2e/` directory.
   the guest-agent channel, serial logs, multiqueue and non-VirtIO NICs,
   additional disks, inline and file-backed Root CA trust, boot policy, and
   selected VM lifecycle operations.
-- [`remote`](examples/remote/topology.yml) shows the `remote` section: one VM
-  that runs on another host, with its template uploaded from the controller
-  (or read in place with `remote: true`).
 
-CI syntax-checks the Python and shell assets and normalizes all five examples
+CI syntax-checks the Python and shell assets and normalizes all four examples
 with placeholders. It intentionally does not run privileged root/KVM E2E.
 
 ## License

@@ -2,10 +2,11 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 )
 
-func normalize(c *Config, baseDir string, fsys FileSystem) error {
+func normalize(c *Config, baseDir string) error {
 	if baseDir == "" {
 		baseDir = "."
 	}
@@ -15,10 +16,6 @@ func normalize(c *Config, baseDir string, fsys FileSystem) error {
 	}
 	ensureSlices(c)
 	for _, template := range c.Templates {
-		if template.Remote {
-			template.Path = filepath.Clean(template.Path)
-			continue
-		}
 		name, path := template.Name, template.Path
 		if !filepath.IsAbs(path) {
 			path = filepath.Join(absBase, path)
@@ -99,7 +96,7 @@ func normalize(c *Config, baseDir string, fsys FileSystem) error {
 		if vm.RootCACertificates == nil {
 			vm.RootCACertificates = []*RootCACertificate{}
 		}
-		if err := normalizeRootCACertificates(name, vm.RootCACertificates, absBase, fsys); err != nil {
+		if err := normalizeRootCACertificates(name, vm.RootCACertificates, absBase); err != nil {
 			return err
 		}
 		if vm.Interfaces == nil {
@@ -152,9 +149,9 @@ func normalize(c *Config, baseDir string, fsys FileSystem) error {
 			}
 		}
 	}
-	for _, template := range c.ControllerTemplates() {
+	for _, template := range c.Templates {
 		name, path := template.Name, template.Path
-		info, err := fsys.Stat(path)
+		info, err := os.Stat(path)
 		if err != nil {
 			return fmt.Errorf("template %q path %q: %w", name, path, err)
 		}

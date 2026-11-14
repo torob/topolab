@@ -11,7 +11,6 @@ import (
 // slices; index is a disposable lookup accelerator built after decoding.
 type Config struct {
 	Name           string         `yaml:"name"`
-	Remote         *Remote        `yaml:"remote,omitempty"`
 	Templates      []*Template    `yaml:"templates"`
 	Storages       []*Storage     `yaml:"storages"`
 	ManagementHost ManagementHost `yaml:"management_host"`
@@ -95,15 +94,9 @@ func (s *Storage) UnmarshalYAML(node *yaml.Node) error {
 	return nil
 }
 
-// Template names a read-only qcow2 image.
 type Template struct {
 	Name string `yaml:"name"`
 	Path string `yaml:"path"`
-	// Remote says that Path names a file on the host that runs the VMs, not on
-	// the controller. Path must then be absolute. It matters only in remote
-	// mode: the controller neither reads nor uploads such a file. In local mode
-	// the host is this machine.
-	Remote bool `yaml:"remote,omitempty"`
 }
 
 type ManagementHost struct {

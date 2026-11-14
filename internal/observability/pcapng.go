@@ -130,17 +130,20 @@ func (p *PcapNGWriter) writeInterface(d InterfaceDescription) error {
 	body = appendOption(body, 0, nil)
 	return writeBlock(p.w, 1, body)
 }
-
-// writeBlock writes one complete block with a single Write call, so a writer
-// that frames or forwards each call never splits a block.
 func writeBlock(w io.Writer, typ uint32, body []byte) error {
 	total := uint32(len(body) + 12)
-	block := make([]byte, 0, total)
-	block = binary.LittleEndian.AppendUint32(block, typ)
-	block = binary.LittleEndian.AppendUint32(block, total)
-	block = append(block, body...)
-	block = binary.LittleEndian.AppendUint32(block, total)
-	_, err := w.Write(block)
+	var h [8]byte
+	binary.LittleEndian.PutUint32(h[0:4], typ)
+	binary.LittleEndian.PutUint32(h[4:8], total)
+	if _, err := w.Write(h[:]); err != nil {
+		return err
+	}
+	if _, err := w.Write(body); err != nil {
+		return err
+	}
+	var t [4]byte
+	binary.LittleEndian.PutUint32(t[:], total)
+	_, err := w.Write(t[:])
 	return err
 }
 func appendOption(dst []byte, code uint16, value []byte) []byte {

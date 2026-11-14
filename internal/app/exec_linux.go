@@ -16,7 +16,6 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/torob/topolab/internal/config"
 	"github.com/torob/topolab/internal/network"
@@ -164,39 +163,6 @@ type ChildExitError struct{ Code int }
 func (e *ChildExitError) Error() string { return fmt.Sprintf("child exited with status %d", e.Code) }
 func (e *ChildExitError) ExitCode() int { return e.Code }
 
-// ExecHost lets a caller other than a local terminal drive `exec` and
-// `router exec`. The agent uses it to give the child a pseudo-terminal or
-// pipes, to inject signals, and to choose the cancellation policy.
-type ExecHost struct {
-	// Stdin, Stdout, and Stderr are the child's descriptors. They must be
-	// *os.File values so that os/exec starts no copy goroutines.
-	Stdin, Stdout, Stderr *os.File
-	// PTY makes Stdin the child's controlling terminal in a new session.
-	PTY bool
-	// Signals delivers signals to forward to the child's process group.
-	Signals <-chan os.Signal
-	// Env holds extra KEY=VALUE entries for the child (for example TERM).
-	Env []string
-	// CancelSignal is sent to the child's process group when the context ends.
-	// Zero means SIGTERM.
-	CancelSignal syscall.Signal
-	// KillAfter, when positive, sends SIGKILL that long after CancelSignal.
-	KillAfter time.Duration
-}
-
-// execDefaultCwd returns the default working directory of an exec child.
-func execDefaultCwd(host *ExecHost, identity execIdentity) (string, error) {
-	if host == nil {
-		return os.Getwd()
-	}
-	if identity.Home != "" {
-		if info, err := os.Stat(identity.Home); err == nil && info.IsDir() {
-			return identity.Home, nil
-		}
-	}
-	return "/", nil
-}
-
 func (a *App) runExec(ctx context.Context, layout state.Layout, manifest *state.Manifest, args []string) error {
 	opts, err := parseExec(args)
 	if err != nil {
@@ -285,7 +251,7 @@ func (a *App) runNamespacedExec(ctx context.Context, layout state.Layout, manife
 		return err
 	}
 	if opts.Cwd == "" {
-		opts.Cwd, err = execDefaultCwd(a.ExecHost, identity)
+		opts.Cwd, err = os.Getwd()
 		if err != nil {
 			return err
 		}
@@ -321,11 +287,7 @@ func (a *App) runNamespacedExec(ctx context.Context, layout state.Layout, manife
 	if err != nil {
 		return err
 	}
-	childEnv := sanitizedExecEnvironment(os.Environ(), identity)
-	if a.ExecHost != nil {
-		childEnv = append(childEnv, a.ExecHost.Env...)
-	}
-	config := execChildConfig{Namespace: namespace, Identity: identity, Cwd: opts.Cwd, Env: childEnv}
+	config := execChildConfig{Namespace: namespace, Identity: identity, Cwd: opts.Cwd, Env: sanitizedExecEnvironment(os.Environ(), identity)}
 	raw, err := json.Marshal(config)
 	if err != nil {
 		return err
@@ -350,55 +312,25 @@ func (a *App) runNamespacedExec(ctx context.Context, layout state.Layout, manife
 	childArgs = append(childArgs, opts.Argv...)
 	cmd := exec.Command(exe, childArgs...)
 	cmd.ExtraFiles = []*os.File{configFile}
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = a.Stdin, a.Stdout, a.Stderr
 	cmd.Env = sanitizedSupervisorEnvironment(os.Environ())
-	cancelSignal, killAfter := syscall.SIGTERM, time.Duration(0)
-	var signals <-chan os.Signal
-	if host := a.ExecHost; host != nil {
-		cmd.Stdin, cmd.Stdout, cmd.Stderr = host.Stdin, host.Stdout, host.Stderr
-		if host.PTY {
-			cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0}
-		} else {
-			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		}
-		if host.CancelSignal != 0 {
-			cancelSignal = host.CancelSignal
-		}
-		killAfter = host.KillAfter
-		signals = host.Signals
-	} else {
-		cmd.Stdin, cmd.Stdout, cmd.Stderr = a.Stdin, a.Stdout, a.Stderr
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start exec child: %w", err)
 	}
-	if signals == nil {
-		local := make(chan os.Signal, 16)
-		signal.Notify(local, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT, syscall.SIGWINCH)
-		defer signal.Stop(local)
-		signals = local
-	}
+	signals := make(chan os.Signal, 16)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT, syscall.SIGWINCH)
+	defer signal.Stop(signals)
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
-	var kill <-chan time.Time
-	ctxDone := ctx.Done()
 	for {
 		select {
 		case sig := <-signals:
 			if value, ok := sig.(syscall.Signal); ok {
 				_ = syscall.Kill(-cmd.Process.Pid, value)
 			}
-		case <-ctxDone:
-			_ = syscall.Kill(-cmd.Process.Pid, cancelSignal)
-			ctxDone = nil
-			if killAfter > 0 {
-				timer := time.NewTimer(killAfter)
-				defer timer.Stop()
-				kill = timer.C
-			}
-		case <-kill:
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-			kill = nil
+		case <-ctx.Done():
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
 		case waitErr := <-done:
 			if waitErr == nil {
 				return nil

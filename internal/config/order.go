@@ -147,31 +147,6 @@ func (c *Config) LookupTemplate(name string) (*Template, bool) {
 	}
 	return findNamed(c.Templates, name, func(v *Template) string { return v.Name })
 }
-
-// HostTemplates returns the templates with remote: true, whose files are on the
-// host.
-func (c *Config) HostTemplates() []*Template {
-	var out []*Template
-	for _, t := range c.Templates {
-		if t.Remote {
-			out = append(out, t)
-		}
-	}
-	return out
-}
-
-// ControllerTemplates returns the templates with remote: false, whose files are
-// on the controller in remote mode.
-func (c *Config) ControllerTemplates() []*Template {
-	var out []*Template
-	for _, t := range c.Templates {
-		if !t.Remote {
-			out = append(out, t)
-		}
-	}
-	return out
-}
-
 func (c *Config) LookupStorage(name string) (*Storage, bool) {
 	if c.index != nil {
 		v, ok := c.index.storages[name]

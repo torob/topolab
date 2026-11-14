@@ -3,10 +3,8 @@
 ## 1. Status and scope
 
 This document specifies `topolab`, a Linux-only tool for
-creating declarative network labs on one KVM host. The tool runs on that host
-(local mode), or it runs on a separate Linux controller and operates the host
-through an agent reached over SSH (remote mode, Section 12). The implementation
-is written in Go and manages QEMU directly. It does not use libvirt.
+creating declarative network labs on one local KVM host. The implementation is
+written in Go and manages QEMU directly. It does not use libvirt.
 
 The tool manages:
 
@@ -19,10 +17,7 @@ The tool manages:
 - directional link latency, jitter, loss, and rate limits;
 - host-side link packet capture and directional counters;
 - read-only qcow2 templates with explicit file or LVM writable disks;
-- persisted, multiplexed QEMU serial logs; and
-- remote operation of one KVM host from a Linux controller over SSH, with
-  resumable content-addressed template transfer and lifecycle jobs that survive
-  loss of the controller connection.
+- persisted, multiplexed QEMU serial logs.
 
 The following features are outside the scope of this specification:
 
@@ -32,22 +27,13 @@ The following features are outside the scope of this specification:
 - QEMU live migration and live hardware reconfiguration other than online disk
   growth and VirtIO balloon-target changes;
 - libvirt integration;
-- integration with the Proxmox VE API, cluster file system, or storage,
-  firewall, and network configuration;
-- a graphical interface;
-- a persistent agent, a network listener, or any remote transport other than
-  OpenSSH;
-- controllers that are not Linux systems;
-- one topology that spans several hosts; and
+- a graphical interface; and
 - automatic restoration through systemd after host reboot.
 
 ## 2. Host contract
 
-The supported hosts are Ubuntu 24.04, Ubuntu 26.04, and Proxmox VE 9, each on
-x86-64 with hardware virtualization and an accessible `/dev/kvm`. In this
-document the host is the machine that runs the VMs, routers, and namespaces. In
-local mode it also runs the `topolab` process. In remote mode the `topolab`
-process runs on a controller and an agent runs on the host.
+The supported host is Ubuntu 26.04 on x86-64 with hardware virtualization and
+an accessible `/dev/kvm`.
 
 The following commands are required for networking operation:
 
@@ -59,39 +45,15 @@ Topologies containing VMs additionally require `qemu-system-x86_64`,
 these VM-only requirements.
 
 `dnsmasq` is additionally required when a router declares a DHCP
-server. QEMU VMs require an OVMF code image and a matching OVMF variables
-image. Unless `--ovmf-code` and `--ovmf-vars` select them, the tool uses the
-first directory in the following list in which `OVMF_CODE_4M.fd` and
-`OVMF_VARS_4M.fd` are both readable regular files:
-
-1. `/usr/share/OVMF/` (Ubuntu);
-2. `/usr/share/pve-edk2-firmware/` (Proxmox VE).
-
-The tool never combines a code image and a variables image from different
-directories.
+server. QEMU VMs require `/usr/share/OVMF/OVMF_CODE_4M.fd` and
+`/usr/share/OVMF/OVMF_VARS_4M.fd`.
 
 The Linux vhost-net accelerator is optional. When `/dev/vhost-net` is
 available and accessible, the tool uses it automatically for VirtIO VM
 interfaces. Its absence must not prevent a VM from running.
 
-On Proxmox VE the tool runs beside Proxmox's own virtualization management, not
-inside it. It starts and supervises its own QEMU processes. It does not use
-`qm`, `pvesm`, the Proxmox API, or `/etc/pve`. It never changes Proxmox
-storage, firewall, or network configuration, and its VMs do not appear in
-Proxmox's interface. An LVM VG supplied to the tool should be dedicated to it
-and should not be managed by Proxmox storage configuration. When a router
-declares an `external` interface, the host firewall policy, including
-`pve-firewall`, remains the operator's responsibility. Proxmox VE does not
-install `sudo` by default; Section 12.3 describes the consequence.
-
-In remote mode the controller must be a Linux system with an OpenSSH client
-named `ssh` in `PATH`. It needs no root privilege, KVM, QEMU, or network tools.
-The host satisfies every requirement of this section.
-
 `config` and `version` are read-only and may run as an ordinary user. All other
-commands require the privileges described by their command contracts. In remote
-mode the controller process runs as an ordinary user for every command, and
-the agent requires effective UID 0 on the host (Section 12.3). The CLI
+commands require the privileges described by their command contracts. The CLI
 must reject runtime operations rather than silently falling back to
 unaccelerated QEMU or partially configured networking.
 
@@ -116,13 +78,7 @@ Global VM-helper options are `--qemu-system PATH`, `--qemu-img PATH`, `--lvm PAT
 overrides must resolve to executable regular files; firmware overrides must be
 readable regular files. The selected helpers are resolved once and used by
 preflight and all subsequent VM operations. Defaults retain PATH lookup for
-executables and the firmware lookup defined in Section 2. In remote mode these
-options name paths on the host.
-
-Global remote options are `--remote DESTINATION`, `--local`,
-`--ssh-opt OPTION` (repeatable), and `--reconnect-timeout D`. The environment
-variable `TOPOLAB_REMOTE` supplies a destination. Section 12.1 defines their
-syntax and precedence.
+executables and the standard OVMF paths from Section 2.
 
 ### 3.1 Commands
 
@@ -222,29 +178,6 @@ syntax and precedence.
   but `up` refuses an active legacy root-datapath manifest and directs the user
   to run `down` first.
 
-`agent install`
-: Remote mode only. Install the controller's own executable on the host as the
-  agent, as defined in Section 12.3. It requires `--remote` or
-  `TOPOLAB_REMOTE`. It reads no topology file and needs no working directory.
-
-`agent --stdio`
-: The endpoint that the controller starts through SSH (Section 12.2). It
-  requires effective UID 0 and refuses to run when its standard input or
-  standard output is a terminal. It is not an interactive command.
-
-`jobs ls [--all]`, `jobs show ID`, `jobs attach ID`, `jobs cancel ID`, `jobs prune`
-: Remote mode only. List, inspect, follow, cancel, and prune lifecycle jobs, as
-  defined in Section 12.6. In local mode these commands fail with a usage
-  error.
-
-`templates ls`, `templates prune [--min-age D]`
-: Remote mode only. List and prune uploaded templates in the host blob store,
-  as defined in Section 12.5. In local mode these commands fail with a usage
-  error.
-
-Except for `version` and `agent install`, every command loads the topology file
-as Section 4 defines. In remote mode the commands behave as Section 12 defines.
-
 ## 4. Configuration format
 
 The input is one strict YAML document. Unknown fields and additional YAML
@@ -256,7 +189,6 @@ The top-level structure is:
 
 ```yaml
 name: example
-remote: {ssh: operator@lab01.example}   # optional
 templates: []
 storages: []
 management_host: {interfaces: []}
@@ -265,10 +197,6 @@ routers: []
 switches: []
 links: []
 ```
-
-The optional `remote` section selects remote operation and is defined in
-Section 4.8. It is omitted from normalized output when absent. It is
-unrelated to the rejected legacy `host` key described below.
 
 Every named collection is an ordered YAML list whose entries carry a `name`;
 VLAN entries carry an `id`. The former named-map syntax is not accepted.
@@ -322,9 +250,7 @@ alternative expressions may be nested. Shell pattern substitutions such as
 required expression produces a warning and is replaced with an empty string.
 Interpolation never executes a shell command.
 
-The process environment is the only interpolation-variable source. In remote
-mode it is the environment of the controller's `topolab` process; the agent
-never consults its own environment (Section 12.4). There are
+The process environment is the only interpolation-variable source. There are
 no special interpolation variables. In particular, `WORKING_DIR` behaves like
 any other process environment variable. Supplying `--working-dir` does not
 define or override an interpolation variable named `WORKING_DIR`. Automatic
@@ -355,14 +281,10 @@ templates:
     path: ./templates/ubuntu.qcow2
 ```
 
-Each `templates` entry contains a unique `name`, a `path`, and an optional
-boolean `remote` that defaults to `false`. With `remote: false`, a relative
-`path` is resolved against the directory containing the topology file; in remote
-mode the file is on the controller. With `remote: true`, `path` must be an
-absolute path, and it names a file on the host that runs the VMs. In local mode
-that host is this machine, so `remote` changes nothing there except the rule
-that the path is absolute. These rules do not depend on the mode. Each file must
-be an existing regular file built separately from `topolab`.
+Each `templates` entry contains a unique `name` and `path`. Relative
+paths are resolved against the directory containing the topology file. Each
+path must identify an existing regular file built separately from
+`topolab`.
 
 Every template must use the qcow2 format and must not itself have a backing
 file. The tool validates the format before use and treats the template as a
@@ -378,21 +300,6 @@ Templates may be inside or outside `working_dir`. Even when a template is
 inside it, `topolab` never builds, modifies, or removes the template, and
 `down` removes only paths recorded as tool-created resources. Template
 contents are SHA-256 identified.
-
-In remote mode a template path names a file on the controller, not on the host.
-The controller validates it, hashes it, and uploads it to the host only when the
-host does not already hold content with that digest. The manifest then records
-the host blob path as the template path (Section 12.5). The host never reads
-the controller path.
-
-In remote mode a template with `remote: true` names a file on the host. The
-controller does not read, hash, or upload it, and `config` on the controller
-does not look for it. The agent validates it on the host as this section
-requires and uses it in place, as local mode does (Section 12.5). The storage
-identity of a VM contains the template path (Section 7). A template that
-changes between `remote: false` and `remote: true` in remote mode therefore
-changes its path and replaces the root disk of every VM that uses it, also when
-the content is the same.
 
 ### 4.2.1 Storage declarations
 
@@ -923,8 +830,7 @@ because no earlier launch exists to space it from; its `start_delay` has no
 effect in that command. A VM that is already running is not launched, so it
 does not wait and does not count as that first launch. `restart` stops a VM
 before its wait, so the VM stays stopped during the wait. The wait holds the topology lock, and cancellation ends it at
-once without starting the VM. Because the topology YAML carries the field,
-remote mode needs no extra option. `start_delay` changes no VM hardware, so it
+once without starting the VM. `start_delay` changes no VM hardware, so it
 needs no restart and preserves every writable disk.
 
 ### 4.5 Routers
@@ -1264,25 +1170,6 @@ For Kubernetes guests, these values describe only the virtual underlay.
 or another operator must choose those values after accounting for the
 encapsulation overhead and smallest underlay MTU of the intended path.
 
-### 4.8 Remote target
-
-```yaml
-remote:
-  ssh: "${LAB_REMOTE:-operator@lab01.example}"
-```
-
-The optional `remote` section names the host that runs the topology. It
-contains exactly one field, `ssh`, a non-empty string. Interpolation applies
-to it. Its value is an OpenSSH destination: `[user@]hostname`,
-`ssh://[user@]hostname[:port]`, or a `Host` alias from the controller's SSH
-configuration. It must not begin with `-` and must not contain whitespace or
-control characters. Unknown fields are errors.
-
-The section is controller input only. It is not part of any hash, is not
-recorded in the manifest, and is parsed and ignored by the agent. Adding,
-changing, or removing it never causes reconciliation. Section 12.1 defines how
-it combines with `--remote`, `--local`, and `TOPOLAB_REMOTE`.
-
 ## 5. Runtime mapping
 
 Every active topology owns one deterministic fabric namespace and one
@@ -1419,8 +1306,6 @@ All persistent and volatile state is stored beneath the resolved
 ```text
 <working_dir>/.topolab/topologies/<name>/
 <working_dir>/.topolab/shared/
-<working_dir>/.topolab/blobs/
-<working_dir>/.topolab/jobs/<name>/
 <working_dir>/captures/<name>/
 ```
 
@@ -1431,14 +1316,6 @@ diagnostic artifacts and is intentionally not topology state; reconciliation
 does not read it and `down` does not remove it. User-managed content elsewhere
 beneath `working_dir`, including `templates/`, is not topology state. No
 runtime file is created under a fixed `/var/lib` or `/run` location.
-
-The blobs directory holds uploaded templates shared by every topology in the
-working directory (Section 12.5). The jobs directory holds the records of
-remote lifecycle jobs (Section 12.6). Both exist only after remote operation
-creates them. Like the captures directory, neither is topology state: `down`
-does not remove them, and `up` never reads job records. A blob is removed only
-by `templates prune`, and a job record is removed only by job retention or
-`jobs prune`.
 
 Only one operation may mutate a topology at a time; mutations take an
 exclusive file lock. Both management-host and router `exec` hold a shared lock
@@ -1485,9 +1362,7 @@ resources.
 9. Start every desired VM and atomically save the new manifest.
 
 A VM's storage-identity hash contains the template path and content digest plus
-the root storage identity and provisioning mode. In remote mode the template
-path is the blob path (Section 12.5), which is a function of the digest, so the
-hash changes only when the content changes. A template-identity change
+the root storage identity and provisioning mode. A template-identity change
 replaces that root disk because an existing writable disk
 must not be silently rebased onto different template contents. It preserves
 every additional disk. Renaming a VM is represented as removal of the old VM
@@ -1591,9 +1466,7 @@ path is accepted only when its fully resolved location is beneath
 `working_dir`. Symlink escape is rejected, missing parent directories beneath
 the working directory are created safely, and an existing output file is
 never overwritten. Capture files are diagnostic artifacts rather than
-topology state: `up` does not read them and `down` does not remove them. In
-remote mode the capture is written on the controller, not under the host's
-`working_dir`, as Section 12.7 defines.
+topology state: `up` does not read them and `down` does not remove them.
 
 ### 8.2 Link counters
 
@@ -1669,11 +1542,6 @@ Cleanup verifies recorded ownership and never recursively deletes an
 unverified working directory or an unrecorded file. Before deleting a
 namespace it stops all recorded QEMU and helper processes, lists remaining
 namespace PIDs, and refuses deletion when any unowned process remains.
-
-In remote mode the agent is the only component that changes the host. The
-trust boundary, privilege model, and handling of transferred secrets are
-defined in Section 12.9. Blob and job records under `working_dir` obey the same
-root-only permission rule as every other generated directory.
 
 ## 11. Conformance checks
 
@@ -1774,595 +1642,3 @@ link and verify that:
   no delivered capture frame; and
 - rebuilding the link changes its generation ID rather than presenting reset
   counters as a continuation of the previous generation.
-
-The remote-mode suite uses a host that is reachable over SSH (it may be the
-controller's own machine through `ssh localhost`), a controller account
-without root privilege, and a host account that may run the agent as root. It
-must verify at least that:
-
-- before `agent install`, a remote command fails with `agent_missing` and
-  changes nothing on the host; after the install, the agent file is root-owned
-  and its SHA-256 equals the controller executable's digest; a second install
-  succeeds without change;
-- a host account that cannot run the agent through `sudo -n` produces
-  `privilege_denied`, and the message shows the example sudoers rule;
-- `config` and `version` start no `ssh` process;
-- the smoke topology's `up`, `ps`, `exec`, `logs`, `capture`, `counters`,
-  `stop`, `start`, `restart`, and `down` in remote mode produce the same host
-  state as in local mode, and `ps --format json` has the same fields;
-- `capture` writes its pcapng file on the controller only, never overwrites an
-  existing file, and never follows a symbolic link;
-- the first `up` uploads each used template once, a later `up` (also after
-  `down`) transfers no template byte, an interrupted upload resumes from the
-  reported offset, and a corrupted transfer leaves neither a blob nor a
-  partial file;
-- a template with `remote: true` is neither hashed nor uploaded by the
-  controller: `up` transfers no template byte, the root disks use the host file
-  in place, `config` in remote mode does not look for the file on the
-  controller, and a missing, unreadable, or non-qcow2 host file fails with
-  `host_template_invalid` before any job exists;
-- a template without a `path`, a template with `remote: true` and a relative
-  `path`, and a `remote` value that is not a boolean are rejected before any
-  mutation, and in local mode the file of a template with `remote: true` is
-  checked like any other template file;
-- terminating the `ssh` process during `up` does not stop the job: it ends
-  `succeeded`, every VM is running, `jobs attach` replays the complete output,
-  and the controller either resumes without duplicated output within
-  `--reconnect-timeout` or exits with status 3 and prints the job identifier;
-- a lifecycle command while a job runs for the same topology fails with
-  `job_active` and changes nothing; `jobs cancel` ends a job as `cancelled`,
-  and a later `up` repairs the topology;
-- ending the connection during `exec` terminates the child and releases the
-  shared lock, and a PTY `exec` returns the exact child exit status and follows
-  window resizes;
-- `templates prune` removes only unreferenced blobs that are older than
-  `--min-age`;
-- adding, changing, or removing the `remote` section changes no hash and causes
-  no reconciliation, and `--local` overrides it; and
-- the checks above pass on Ubuntu 24.04, Ubuntu 26.04, and Proxmox VE 9,
-  including the firmware lookup order of Section 2.
-
-## 12. Remote operation
-
-Remote operation lets a Linux controller manage a KVM host that is a different
-machine. The controller runs the `topolab` executable as an unprivileged user.
-Through SSH it starts a second copy of the same executable, the agent, on the
-host. The agent performs every operation that Sections 3 through 10 define, on
-the host. In remote mode the controller never creates, changes, or inspects
-host resources itself. A command behaves as those sections define unless this
-section states a difference.
-
-### 12.1 Selecting remote mode
-
-The first applicable rule decides the mode:
-
-1. `--local` selects local mode.
-2. `--remote DESTINATION` selects remote mode.
-3. A non-empty `TOPOLAB_REMOTE` environment variable selects remote mode with
-   that destination.
-4. A `remote` section in the topology file (Section 4.8) selects remote mode.
-5. Otherwise the invocation is in local mode.
-
-Supplying `--local` together with `--remote` is a usage error. `version`
-ignores these rules. `agent install` uses only rules 2 and 3 and requires one
-of them. DESTINATION has the syntax and restrictions of `remote.ssh` in
-Section 4.8.
-
-`--ssh-opt OPTION` may repeat. The controller passes each value to `ssh` as
-the argument of `-o` and never through a shell. `--reconnect-timeout D` is a
-positive integer followed by `ms`, `s`, `m`, or `h`, or the value `0`. It
-defaults to `2m` and applies only to lifecycle jobs (Section 12.6).
-
-In remote mode the locations of inputs and outputs are:
-
-| Item | Location |
-| --- | --- |
-| Topology file, template files with `remote: false`, Root CA files named by `path` | controller |
-| Interpolation variables | controller environment |
-| `capture --output` and the template digest cache | controller |
-| Template files with `remote: true` | host |
-| Working directory, state, disks, sockets, logs, blob store, job store | host |
-| Helper executables and firmware named by `--qemu-system`, `--ovmf-code`, and the other helper options | host |
-
-`--working-dir` and `WORKING_DIR` name a path on the host. The path must be
-absolute; a relative value is a usage error. The controller does not contact the
-host to check it. The agent applies every rule of Section 4.1 and reports a
-failure as `working_dir_invalid`.
-
-The controller parses and validates the topology with the rules of Section 4,
-except the working-directory checks, before it contacts the host. A failure
-at this stage never reaches the host. In remote mode `config` runs only on the
-controller: it starts no `ssh` process, validates the files of templates with
-`remote: false` on the controller, does not look for the files of templates with
-`remote: true`, requires a non-empty working directory but checks it only lexically, and prints
-the normalized YAML including `remote`.
-
-### 12.2 Transport and protocol
-
-The controller starts `ssh` with an argument vector and never through a local
-shell. The arguments appear in this order: `-T`; each `--ssh-opt` value as
-`-o OPTION`; then `-o BatchMode=yes`, `-o ServerAliveInterval=15`, and
-`-o ServerAliveCountMax=3`; then `--`; then DESTINATION; then the remote
-command. User options come before the defaults so that they take precedence,
-because `ssh` uses the first value it obtains for an option. The controller
-never passes an option that weakens host-key verification. The controller
-starts `ssh` in its own process group, so that an interrupt typed in the
-controller's terminal reaches only the controller, which decides what it means.
-The standard error of `ssh` is passed to the controller's standard error
-unchanged.
-
-The remote command is `sh -c` with one constant script (Section 12.3) in which
-only the agent digest varies. The script contains no single quote, backslash,
-or exclamation mark, so every common login shell passes it unchanged.
-
-The standard input and output of the `ssh` process carry the protocol. One SSH
-session carries exactly one command. The agent session ends when its command
-ends or when the stream closes. No agent session is long-lived and none listens
-on a socket or port.
-
-The handshake and stream rules are:
-
-- The controller sends a hello with the protocol number `1`, its executable
-  digest, and a random 128-bit nonce.
-- The agent answers with a fixed preamble that contains the nonce, then its own
-  hello with its executable digest, CPU architecture, kernel release, and
-  version string. The version string is for display only.
-- The controller scans the agent's standard output for the preamble. It
-  discards at most 64 KiB of earlier bytes, such as output of login scripts, and
-  copies them to its standard error. If no preamble arrives, the command fails
-  with `protocol_error`.
-- The controller fails with `agent_mismatch` when the agent's digest or
-  architecture differs from its own.
-- Each side sends a ping after 15 seconds of silence and answers every ping
-  with a pong. An agent session ends after 60 seconds without any frame from
-  the controller. The controller treats 60 seconds without any frame from the
-  agent as loss of the connection.
-- The agent and the job runner ignore `SIGPIPE`.
-
-The byte layout of frames, the preamble, and the numeric codes are private.
-They are not part of this specification, because the controller always starts
-the agent whose digest equals its own. An implementation must provide:
-
-- length-prefixed, typed frames with a payload of at most 8 MiB; a larger frame
-  is a `protocol_error`;
-- independent directions, so that a stalled output stream never delays a
-  cancel, signal, or resize frame;
-- the frame kinds hello, request, standard input data and end, standard output
-  data, standard error data, resize, signal, cancel, ping, pong, blob status,
-  blob data, blob end, blob acknowledgement, blob result, job notice, error, and
-  exit; the agent sends `exit` last, and `error` carries a code and a message;
-  and
-- command output that passes through unchanged, so that `ps --format json` and
-  `counters --format json` are byte-identical to local mode for the same state.
-
-### 12.3 Agent installation and privilege
-
-The agent for a controller is the controller's own executable. It is installed
-on the host at:
-
-```text
-/usr/local/lib/topolab/<sha256>/topolab
-```
-
-`<sha256>` is the lowercase hexadecimal SHA-256 digest of the executable's
-bytes. The directory and the file are owned by root and are not writable by
-group or others. An installed file is never modified. Executables with
-different digests coexist, and no command removes an installed agent. A
-running serial collector or helper therefore stays valid after an upgrade. An
-installed agent is software, not runtime state, so the rule in Section 7 about
-fixed `/var/lib` and `/run` locations does not apply to it.
-
-The remote command script does the following, in order:
-
-1. Exit with status 97 when the agent file is not an executable file.
-2. When the effective UID is 0, run the agent directly with `exec`.
-3. Otherwise exit with status 98 unless `sudo -n -l` reports that the agent
-   command is allowed, and then run it with `exec sudo -n`.
-
-The agent exits with status 99 when its effective UID is not 0 or when its
-standard input or output is a terminal. The controller maps 97 to
-`agent_missing`, and 98 and 99 to `privilege_denied`. The agent sets its own
-`PATH` and does not rely on the environment that `sudo` or the login produces.
-
-The SSH user that the operator supplies must already be allowed by the host's
-`sudoers` policy to run that command as root without a password, or must be
-root. TopoLab never reads, writes, or generates `sudoers` files. A
-`privilege_denied` message prints the following example for the current digest
-and states that the rule gives that account root-equivalent control:
-
-```text
-operator ALL=(root) NOPASSWD: /usr/local/lib/topolab/<sha256>/topolab agent --stdio
-```
-
-A rule that covers several digests must use one bracket expression per hex
-digit and must not use `*`, because `*` also matches `/` and `..`. Proxmox VE
-does not install `sudo` by default. On such a host the operator either
-supplies a root account or installs `sudo` and a rule.
-
-`agent install` installs the agent in two phases. Both phases use the same
-destination. It fails when the controller's executable is not Linux x86-64.
-
-1. As the SSH user and without `sudo`, it creates a private staging directory
-   with mode 0700, sends the executable over the SSH connection, and checks its
-   SHA-256.
-2. Through an interactive `ssh -t` session, so that `sudo` may prompt, or
-   directly when the SSH user is root, it creates a root-owned temporary
-   directory beside the destination, copies the staged file into it, computes
-   the SHA-256 of that root-owned copy, sets mode 0755, and renames the
-   directory to `<sha256>`. When the destination already exists, it verifies
-   the installed digest and changes nothing. It fails when the install root
-   (`/usr/local/lib/topolab`) is not a real directory owned by root, or is
-   writable by group or others.
-
-The command removes the staging directory in every case. It prints a warning
-when the host's login manager is configured to kill a user's processes at
-logout (`KillUserProcesses=yes`), because that setting also kills jobs and
-QEMU processes (Section 12.6). The controller never installs an agent
-implicitly: a remote command whose agent is missing fails with `agent_missing`
-and the instruction to run `agent install`.
-
-### 12.4 Requests and inputs
-
-For each command the controller sends one request that contains:
-
-- the command name and its arguments;
-- for commands that need a topology, the topology text exactly as read, and the
-  controller directory that contains the topology file (`base_dir`);
-- the interpolation variables that the topology looked up, including the names
-  that were unset, with a flag that tells whether each was set;
-- the working directory and the helper overrides;
-- for `up`, the name, SHA-256 digest, and size of each template with
-  `remote: false` that at least one VM uses; a template with `remote: true` is
-  not listed;
-- the contents of each Root CA file that a VM names by `path`, keyed by its
-  resolved controller path; and
-- for `exec` and `router exec`, the terminal size and the value of `TERM`.
-
-A Root CA file may not exceed 1 MiB, and a request may not exceed 8 MiB. The
-controller refuses a larger request before it sends anything
-(`request_too_large`). The agent handles a request as follows:
-
-1. It parses the topology as Section 4 defines, resolves relative paths against
-   `base_dir`, and uses only the request's variables as the interpolation
-   source. A variable that the request does not list is a `protocol_error`; the
-   agent never treats it as unset and never consults its own environment. It
-   parses and ignores the `remote` section.
-2. It behaves as if every transferred Root CA file had the transferred contents
-   at its path.
-3. For `up`, it replaces the path of each used template with `remote: false` by
-   its blob path (Section 12.5). A used template with `remote: false` that the
-   request does not list is an error. It leaves a template with `remote: true`
-   unchanged.
-4. It computes the SHA-256 of its normalized configuration and compares it with
-   the value that the controller sent from its own parse, before the host
-   changes in any way. A difference is a `protocol_error`.
-5. For `up`, it checks each used template with `remote: true` on the host, as
-   Section 12.5 requires, before it creates a job.
-6. It runs the command with the semantics of Sections 3 through 10.
-
-The agent validates every request field as untrusted input. In particular, it
-takes the identity of an `exec` child only from its own environment
-(Section 12.7), never from the request.
-
-### 12.5 Template transfer and blob store
-
-Template transfer applies to `up` and to templates with `remote: false`. The
-controller validates every declared template file with `remote: false` as
-Section 4.2 and `up` require, and computes the SHA-256 digest and size of each
-such template that at least one VM uses. It may cache a digest
-keyed by device, inode, size, modification time, and change time. It must
-re-hash when any of those values differs, and it must check the file again after
-a transfer. A change during the transfer causes one new hash and one retry.
-
-The blob store is `<working_dir>/.topolab/blobs/`. It has these paths:
-
-```text
-sha256/<digest>          completed blobs
-partial/<digest>         uploads in progress
-locks/<digest>.lock      per-digest locks
-.gc.lock                 coordination lock for prune
-```
-
-The directories are root-only. Every path component of a blob is derived from
-its digest, so the template path that Section 7 records depends only on the
-content.
-
-For each digest the agent reports `present`, `partial` with the byte offset
-that equals the partial file's size, or `absent`. The controller sends the
-missing bytes from that offset in chunks of at most 4 MiB. The agent
-acknowledges each chunk, and the controller keeps at most four chunks
-unacknowledged. The controller shows progress on its standard error. It uses no
-compression unless the operator passes an SSH option for it.
-
-The agent holds the per-digest lock for the whole upload. A second uploader of
-the same digest waits and then asks again. At the start of an upload the agent
-reserves the declared size in the file system and fails with `blob_no_space` if
-it cannot. After the last chunk the agent:
-
-1. computes the SHA-256 digest of the partial file; on a difference it deletes
-   the file and fails with `blob_digest_mismatch`, and the controller restarts
-   once from offset 0;
-2. validates the file as Section 4.2 requires (qcow2 format, no backing file)
-   and fails with `blob_invalid` otherwise;
-3. flushes the file and its directory to stable storage;
-4. sets mode 0444; and
-5. renames it into `sha256/` without replacing an existing file.
-
-An `up` that selects a blob updates its modification time. When a present blob
-no longer matches its name, the agent fails with `blob_corrupt` and leaves the
-file in place. No command other than `templates prune` removes a blob.
-
-While an `up` session checks for or uploads blobs, it holds `.gc.lock` in shared
-mode until its job is registered. `templates ls` prints, for each blob, the
-digest, the size in bytes, the last-use time, and the names of topologies that
-reference it. `templates prune [--min-age D]` takes `.gc.lock` exclusively and
-fails after 10 seconds if it cannot. It then removes each blob that is not
-protected and is at least `D` old, where `D` defaults to `24h`. It also removes
-partial files of that age whose lock is free, and it skips every digest whose
-lock is busy. A blob is protected when any of these names it:
-
-- the `template_path` of a manifest under `topologies/`;
-- the backing file recorded in the qcow2 header of any file under
-  `topologies/` (this covers overlays that exist before their manifest entry
-  does); or
-- the request of a job that is not in a terminal state.
-
-A template with `remote: true` takes no part in the transfer. The controller
-does not read, hash, or list it, and the agent makes no blob for it. Before `up`
-creates a job, the agent checks each such template that at least one VM uses.
-The file must exist, must be a regular file, must be a qcow2 image without a
-backing file (Section 4.2), and must be readable by the agent. Otherwise `up`
-fails with `host_template_invalid`, creates no job, and changes nothing on the
-host.
-
-`up` then uses the file in place, as local mode does. It computes the content
-digest of the file on every `up`, and Section 7 records the host path and the
-digest. TopoLab never modifies, moves, or removes the file, and
-`templates prune` never touches it. A change of its content is a
-template-identity change (Section 7). The operator must not change a file that
-existing root disks depend on until the dependent VMs are removed.
-
-### 12.6 Lifecycle jobs
-
-`up`, `start`, `stop`, `restart`, and `down` run as jobs. A job is a detached
-process on the host. It outlives the SSH session, the agent session, and the
-controller.
-
-The controller creates a random 128-bit job identifier, written as 32
-lowercase hexadecimal digits, and sends it in the request. A request that
-carries an existing identifier attaches to that job when its request digest is
-equal and fails with `protocol_error` otherwise. A reconnection therefore never
-creates a second job.
-
-Job records are stored in `<working_dir>/.topolab/jobs/<name>/<job-id>/`:
-
-- `status.json` holds the record version, state, command, arguments, creation,
-  start, and finish times (UTC, RFC 3339), exit status, and the runner identity:
-  PID, process start time from `/proc/<pid>/stat`, boot identifier, and
-  executable path;
-- `secrets.json` (mode 0600) holds the topology text, `base_dir`, the request
-  variables, the Root CA contents, and the helper overrides; and
-- `output.log` holds the output records.
-
-The agent creates a job while it holds the exclusive lock
-`jobs/<name>/.lock`:
-
-1. It fails with `job_active`, naming the identifier, when another job of the
-   topology is not in a terminal state and its runner is alive. A job that waits
-   for the topology lock is active. A job whose runner is gone is first marked
-   `lost`.
-2. It writes the records with the state `pending`.
-3. It starts the runner: the agent executable with an internal subcommand, in
-   its own session, with `SIGHUP` ignored, and with no standard stream
-   attached to the SSH session.
-4. It keeps the lock until the runner records `running`, for at most 10
-   seconds. After that it marks the job `failed`.
-
-The agent session never takes the topology lock. The runner takes it exactly as
-local mode does (Section 7). While the runner waits for the lock it writes one
-notice to its output.
-
-A job has one of these states: `pending`, `running`, `succeeded`, `failed`,
-`cancelled`, or `lost`. The last four are terminal. `lost` means that the
-runner no longer exists, which the agent detects when the PID is gone or when
-its start time, executable, or boot identifier differs. The first agent that
-observes this records it under the job lock. A lost job may have left the
-topology partly changed. `up` is then permitted and repairs it as Section 7
-defines. A command that ends because its context was cancelled records
-`cancelled`; any other error records `failed`.
-
-At the end the runner appends a final exit record to the output, then replaces
-`status.json` atomically with the terminal state, and then deletes
-`secrets.json`. The agent deletes `secrets.json` when it records `lost`.
-
-`output.log` is a sequence of records. Each record has a length, a stream tag
-(standard output or standard error), and at most 64 KiB of payload. Offsets are
-record boundaries. A reader ignores an incomplete final record while the runner
-is alive, and discards it when the runner is dead. The log is limited to 64 MiB.
-After that limit the runner appends a truncation marker and stops recording
-output; the job continues.
-
-The agent session sends the output records to the controller from a given
-offset, then sends the job's exit status as the final frame. The status is 0 for
-`succeeded` and 1 for every other terminal state. When the controller loses
-the connection it reconnects with a delay that starts at 1 second, doubles, and
-never exceeds 15 seconds, until `--reconnect-timeout` has passed since the loss.
-It resumes from the last record boundary that it received, so output is neither
-lost nor repeated. When the time has passed, it prints the job identifier, the
-destination, and the `jobs attach` command, and exits with status 3. A value of
-`0` disables reconnection.
-
-Interrupts on the controller act on a lifecycle command as follows:
-
-- The first SIGINT sends a cancel request. The agent sends SIGTERM to the
-  runner, which cancels the command exactly as an interrupt does in local mode.
-  The controller stays attached and exits with the job's status.
-- A second SIGINT detaches the controller. It exits with status 3.
-- SIGTERM, SIGHUP, or SIGQUIT on the controller detaches it and exits with
-  status 3. It never cancels the job.
-
-The job commands are:
-
-`jobs ls [--all]`
-: List the jobs of the current topology, or of every topology in the working
-  directory with `--all`. The columns are ID, TOPOLOGY, COMMAND, STATE,
-  STARTED, FINISHED, and EXIT.
-
-`jobs show ID`
-: Print the contents of `status.json` as indented JSON. It never prints
-  `secrets.json`.
-
-`jobs attach ID`
-: Replay the output from offset 0, follow it until the job ends, and exit with
-  the job's status. A detach by SIGINT exits with status 3.
-
-`jobs cancel ID`
-: Send SIGTERM to the runner and wait until the job reaches a terminal state.
-
-`jobs prune`
-: Apply the retention rule now to the jobs of the current topology.
-
-An unknown identifier fails with `job_not_found`. Retention applies when a job
-is created and when `jobs prune` runs. The agent removes a finished job
-directory only when its finish time is more than 7 days old and the job is
-outside the 20 most recent finished jobs of its topology.
-
-Neither a lost connection nor the end of an agent session or `ssh` process
-stops, restarts, or changes a VM, router, helper, or network resource, other
-than the changes that a running job makes itself. A job and the QEMU processes
-that it starts also survive the end of the SSH session unless the host's login
-manager kills the user's processes (Section 12.3).
-
-### 12.7 Read-only, interactive, and capture commands
-
-`ps`, `logs`, `counters`, and the `jobs ls`, `jobs show`, and `templates ls`
-commands run synchronously in the agent session. The agent cancels them when
-the connection ends. They change no state. `logs --follow` runs until the
-controller is interrupted or the connection ends.
-
-`exec` and `router exec` run in the agent session and hold the shared topology
-lock for the lifetime of the child, as Section 3.1 defines.
-
-- The child's identity is the agent's original caller: the `SUDO_UID` and
-  `SUDO_GID` pair that `sudo` sets, or root when the agent runs directly as
-  root. `--user` has its meaning in Section 3.1.
-- The child's working directory is `--cwd` (a host path), otherwise the home
-  directory of the child's identity, otherwise `/`. The controller's directory
-  is never used.
-- The only value that the controller sends to the child's environment is
-  `TERM`, and only when the controller's standard input is a terminal. All
-  other environment rules of Section 3.1 hold.
-- When the controller's standard input and output are terminals, the agent
-  allocates a pseudo-terminal and the child gets it as its controlling
-  terminal, in its own session. The controller sets its own terminal to raw
-  mode and restores it on every exit path. It forwards size changes, and the
-  agent applies them to the pseudo-terminal. An interrupt character typed in the
-  terminal reaches the child through the terminal driver. Standard error is
-  merged into the terminal stream.
-- Otherwise the child gets separate pipes, in its own process group. The
-  controller forwards `SIGINT`, `SIGTERM`, `SIGHUP`, and `SIGQUIT` to that
-  group, and the end of the controller's standard input closes the child's
-  standard input. After the child exits, the agent stops copying output within
-  250 ms, so that a background descendant that holds a pipe cannot block the
-  command.
-- The command returns the child's exact exit status, including 128 plus the
-  signal number for a signalled child.
-- When the connection ends, the agent sends `SIGHUP` to the child's process
-  group, and `SIGKILL` after 5 seconds. It releases the shared lock when the
-  child exits.
-
-`capture` streams the pcapng data from the agent to the controller. The
-controller creates the output file, and the agent does not write a capture file
-on the host. The agent applies `--direction`, `--snaplen`, `--duration`, and
-`--count`, and sends whole pcapng blocks only. A relative `--output` resolves
-against the controller's current directory, and its parent directory must
-already exist. When `--output` is omitted, the file is:
-
-```text
-./captures/<topology>/<link>-<UTC timestamp>.pcapng
-```
-
-relative to the controller's current directory, and the controller creates the
-missing directories. The controller creates the file with exclusive creation and
-without following symbolic links, and never overwrites an existing file. It
-removes the file when no data arrived. On success it prints the controller path
-that it wrote. An interrupt on the controller sends a cancel request. The
-agent finishes the current block and ends the capture, and the command exits
-with status 0 as Section 8.1 defines. When the connection ends instead, the file
-holds complete blocks only, and the command exits with status 1.
-
-### 12.8 Connection loss, exit statuses, and errors
-
-The effect of a lost connection, or of a terminated controller, is:
-
-| Command | Effect |
-| --- | --- |
-| `up`, `start`, `stop`, `restart`, `down` | The job continues. The controller reconnects (Section 12.6). |
-| `ps`, `logs`, `counters`, `jobs ls`, `jobs show`, `templates ls` | The agent cancels the command. No state changed. |
-| `jobs attach`, `jobs cancel` | The command ends. The job continues, or the cancel stays in effect. |
-| `templates prune` | The agent stops after the current removal. Each removal is independent. |
-| `exec`, `router exec` | The child group receives `SIGHUP`, then `SIGKILL` after 5 seconds. |
-| `capture` | The agent ends the capture. The controller's file holds complete blocks only. |
-| Template upload during `up` | The partial file stays. The next upload resumes from its size. |
-
-For a command other than a lifecycle job, the first interrupt on the controller
-sends a cancel request and the second ends the `ssh` process and exits with
-status 1.
-
-The controller exits with these statuses:
-
-| Status | Meaning |
-| --- | --- |
-| 0 | Success. |
-| 1 | The command or the remote operation failed. |
-| 2 | Usage error. |
-| 3 | A lifecycle job continues without the controller: the reconnection time passed, or the controller detached. |
-| other | `exec` and `router exec` only: the child's exit status. |
-
-When the connection ends without an exit frame, the status is 3 if a job
-exists and 1 otherwise. The controller never reports the exit status of `ssh`.
-
-Every error that the agent reports carries a stable lowercase code. The
-controller prints it as `topolab: remote: <code>: <message>`. The codes are:
-
-| Code | Meaning |
-| --- | --- |
-| `agent_missing` | The agent for the controller's digest is not installed. |
-| `agent_mismatch` | The agent's digest or architecture differs from the controller's. |
-| `privilege_denied` | The account cannot run the agent as root. |
-| `protocol_error` | A malformed frame, a missing preamble, an unknown variable, a request digest conflict, or a configuration mismatch. |
-| `request_too_large` | A request or a Root CA file exceeds its limit. |
-| `working_dir_invalid` | The host rejects the working directory. |
-| `job_active` | Another job of the topology is running. |
-| `job_not_found` | The job identifier is unknown. |
-| `blob_digest_mismatch` | An uploaded template does not match its digest. |
-| `blob_invalid` | An uploaded template is not a qcow2 file without a backing file. |
-| `blob_corrupt` | A stored blob does not match its name. |
-| `blob_no_space` | The host cannot reserve space for an upload. |
-| `host_template_invalid` | A template with `remote: true` is missing on the host, is not a regular file, is not readable, or is not a qcow2 image without a backing file. |
-
-### 12.9 Security
-
-The trust boundary is SSH. The controller uses the operator's `ssh` client and
-its configuration, including host-key verification, and never disables or
-weakens verification. The controller starts `ssh` through an argument vector,
-and it validates the destination as Section 4.8 requires.
-
-The agent accepts frames only from its standard input. It opens no network
-socket. It runs only the operations that this specification defines; `exec`
-and `router exec` keep their contracts in Section 3.1. It refuses to run unless
-its effective UID is 0 and its standard input and output are not terminals.
-
-The right to run the agent as root is equivalent to administrative control of
-every topology and every file under any working directory that the operator
-names. It also lets the account name any qcow2 file on the host as a template
-with `remote: true`, and the VMs of that topology can read the file. The operator
-grants it only to trusted accounts and limits it with the
-`sudoers` rule of Section 12.3 and with SSH key policy.
-
-Only the variables that a topology looks up leave the controller. They are not
-logged. A job keeps them in `secrets.json` only while it runs. The blob and job
-stores are root-only, as Section 10 requires. The controller writes only these
-files: the `capture` output, the template digest cache under
-`$XDG_CACHE_HOME/topolab` (default `~/.cache/topolab`, mode 0600), and its
-temporary files while it runs.

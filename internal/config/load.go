@@ -23,46 +23,18 @@ type Result struct {
 	Config     *Config
 	WorkingDir string
 	Warnings   []string
-	// Data is the topology text exactly as read, and BaseDir is the directory
-	// that contains the topology file. Remote operation sends both to the agent.
-	Data    []byte
-	BaseDir string
 }
 
 // Load parses exactly one YAML document, interpolates its string values,
 // applies defaults, resolves paths, validates it, and returns a normalized
-// configuration. It never creates the working directory or runtime state. It
-// runs on the host, so it also checks the files of templates with remote: true.
+// configuration. It never creates the working directory or runtime state.
 func Load(opts LoadOptions) (*Result, error) {
+	if opts.File == "" {
+		opts.File = "topology.yml"
+	}
 	wd, err := ResolveWorkingDir(opts.WorkingDir)
 	if err != nil {
 		return nil, err
-	}
-	result, err := loadTopology(opts, wd)
-	if err != nil {
-		return nil, err
-	}
-	if err := ValidateTemplateFiles(result.Config.HostTemplates()); err != nil {
-		return nil, err
-	}
-	return result, nil
-}
-
-// LoadTopology loads a topology file like Load but performs no working-directory
-// check and does not look for the files of templates with remote: true. The
-// returned Result has an empty WorkingDir. Remote mode uses it on the
-// controller, where the working directory and those files are on the host; a
-// caller that then runs the topology on this machine validates them with
-// ValidateTemplateFiles.
-func LoadTopology(opts LoadOptions) (*Result, error) {
-	return loadTopology(opts, "")
-}
-
-// loadTopology reads and validates the topology file. A non-empty wd also
-// checks generated socket paths against that working directory.
-func loadTopology(opts LoadOptions, wd string) (*Result, error) {
-	if opts.File == "" {
-		opts.File = "topology.yml"
 	}
 	file, err := filepath.Abs(opts.File)
 	if err != nil {
@@ -80,26 +52,16 @@ func loadTopology(opts LoadOptions, wd string) (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", file, err)
 	}
-	if wd != "" {
-		if err := validateSocketPaths(wd, cfg); err != nil {
-			return nil, err
-		}
-	}
-	if err := ValidateTemplateFiles(cfg.ControllerTemplates()); err != nil {
+	if err := validateSocketPaths(wd, cfg); err != nil {
 		return nil, err
 	}
-	return &Result{Config: cfg, WorkingDir: wd, Warnings: warnings, Data: data, BaseDir: filepath.Dir(file)}, nil
+	if err := validateTemplateFiles(cfg.Templates); err != nil {
+		return nil, err
+	}
+	return &Result{Config: cfg, WorkingDir: wd, Warnings: warnings}, nil
 }
 
-// CheckWorkingDir applies the working-directory rules of the specification to
-// a parsed topology: the generated Unix socket paths must fit the kernel limit.
-func CheckWorkingDir(wd string, cfg *Config) error {
-	return validateSocketPaths(wd, cfg)
-}
-
-// ValidateTemplateFiles checks that every template is an existing regular
-// qcow2 file without a backing file.
-func ValidateTemplateFiles(templates []*Template) error {
+func validateTemplateFiles(templates []*Template) error {
 	for _, template := range templates {
 		name, path := template.Name, template.Path
 		info, err := os.Stat(path)
@@ -133,30 +95,9 @@ func ValidateTemplateFiles(templates []*Template) error {
 	return nil
 }
 
-// ParseOptions controls ParseWith.
-type ParseOptions struct {
-	// BaseDir resolves relative template and Root CA paths.
-	BaseDir string
-	// Lookup supplies the interpolation variables. A nil Lookup reports every
-	// variable as unset.
-	Lookup func(string) (string, bool)
-	// FS serves template metadata and Root CA files. A nil FS is the host file
-	// system.
-	FS FileSystem
-}
-
 // Parse parses topology data. baseDir is used to resolve relative template
 // paths and lookup supplies the process environment.
 func Parse(data []byte, baseDir string, lookup func(string) (string, bool)) (*Config, []string, error) {
-	return ParseWith(data, ParseOptions{BaseDir: baseDir, Lookup: lookup})
-}
-
-// ParseWith parses topology data with explicit file access.
-func ParseWith(data []byte, opts ParseOptions) (*Config, []string, error) {
-	baseDir, lookup, fsys := opts.BaseDir, opts.Lookup, opts.FS
-	if fsys == nil {
-		fsys = OSFileSystem()
-	}
 	var doc yaml.Node
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	if err := dec.Decode(&doc); err != nil {
@@ -202,7 +143,7 @@ func ParseWith(data []byte, opts ParseOptions) (*Config, []string, error) {
 	if err := validateDecoded(&cfg); err != nil {
 		return nil, nil, err
 	}
-	if err := normalize(&cfg, baseDir, fsys); err != nil {
+	if err := normalize(&cfg, baseDir); err != nil {
 		return nil, nil, err
 	}
 	validationWarnings, err := validate(&cfg)
@@ -294,9 +235,6 @@ func validateExplicitDefaults(doc *yaml.Node) error {
 		}
 		for i := 0; i < len(n.Content); i += 2 {
 			key, value := n.Content[i].Value, n.Content[i+1]
-			if key == "remote" && value.Kind == yaml.ScalarNode && value.Tag == "!!null" {
-				return fmt.Errorf("line %d: remote may not be empty", value.Line)
-			}
 			if (key == "cache" || key == "aio") && value.Kind == yaml.ScalarNode && value.Tag == "!!null" {
 				return fmt.Errorf("line %d: %s may not be empty", value.Line, key)
 			}
