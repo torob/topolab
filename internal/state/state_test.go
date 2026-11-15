@@ -191,3 +191,60 @@ func TestLayoutSeparatesNetworkAndVMLocks(t *testing.T) {
 		t.Fatalf("lock paths = %q, %q", layout.LockPath, layout.VMLockPath)
 	}
 }
+
+func TestVersion3ManifestIsReadAndSavedAsVersion4(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "manifest.json")
+	if err := os.WriteFile(path, []byte(`{"version":3,"topology":"lab","updated_at":"2026-11-01T00:00:00Z"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Version != 3 || len(m.Snapshots) != 0 {
+		t.Fatalf("loaded manifest = %#v", m)
+	}
+	if err := Save(path, m); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"version": 4`) {
+		t.Fatalf("saved manifest:\n%s", data)
+	}
+	if err := os.WriteFile(path, []byte(`{"version":5,"topology":"lab"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "unsupported manifest version 5") {
+		t.Fatalf("future manifest error = %v", err)
+	}
+}
+
+func TestSnapshotNamesAndPaths(t *testing.T) {
+	for _, name := range []string{"base", "a", "after-install.2", "x_y", strings.Repeat("a", 63)} {
+		if !ValidSnapshotName(name) {
+			t.Errorf("ValidSnapshotName(%q) = false", name)
+		}
+	}
+	for _, name := range []string{"", "Base", "-base", ".base", "a/b", "a b", strings.Repeat("a", 64), "base\n"} {
+		if ValidSnapshotName(name) {
+			t.Errorf("ValidSnapshotName(%q) = true", name)
+		}
+	}
+	layout, err := NewLayout(t.TempDir(), "lab")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := layout.SnapshotVarsPath("base", "vm1")
+	if err != nil || path != filepath.Join(layout.TopologyDir, "snapshots", "base", "vm1.OVMF_VARS.fd") {
+		t.Fatalf("SnapshotVarsPath = %q, %v", path, err)
+	}
+	if _, err := layout.SnapshotVarsPath("../x", "vm1"); err == nil {
+		t.Fatal("an unsafe snapshot name was accepted")
+	}
+	if _, err := layout.SnapshotVarsPath("base", "../vm1"); err == nil {
+		t.Fatal("an unsafe node name was accepted")
+	}
+}

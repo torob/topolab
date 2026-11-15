@@ -98,12 +98,20 @@ type App struct {
 	HardStopTimeout time.Duration
 	// Sleep waits for d and returns early with the context error on cancel.
 	// It runs the VM start_delay wait.
-	Sleep         func(context.Context, time.Duration) error
-	imagesDefault bool
-	seedsDefault  bool
-	qemuDefault   bool
-	lvmDefault    bool
-	autoAIO       string
+	Sleep func(context.Context, time.Duration) error
+	// OpenSnapshotQMP opens the QMP access that snapshot commands use.
+	OpenSnapshotQMP func(string) snapshotQMP
+	// GuestAgentExec runs one guest-agent command, for example
+	// guest-fsfreeze-freeze.
+	GuestAgentExec func(context.Context, string, string) (json.RawMessage, error)
+	// SyncBlockDevice writes the host page cache of a block device to the
+	// device.
+	SyncBlockDevice func(string) error
+	imagesDefault   bool
+	seedsDefault    bool
+	qemuDefault     bool
+	lvmDefault      bool
+	autoAIO         string
 }
 
 // LockWaitNotice is the line a lifecycle command writes to stderr when another
@@ -185,6 +193,15 @@ func (a *App) defaults() {
 	if a.OpenQMP == nil {
 		a.OpenQMP = func(path string) qmpClient { return qemu.NewQMPClient(path, nil) }
 	}
+	if a.OpenSnapshotQMP == nil {
+		a.OpenSnapshotQMP = func(path string) snapshotQMP { return qemu.NewQMPClient(path, nil) }
+	}
+	if a.GuestAgentExec == nil {
+		a.GuestAgentExec = qemu.GuestAgentExecute
+	}
+	if a.SyncBlockDevice == nil {
+		a.SyncBlockDevice = syncBlockDevice
+	}
 	if a.Now == nil {
 		a.Now = time.Now
 	}
@@ -265,6 +282,70 @@ func (a *App) Run(ctx context.Context, command Command) error {
 			return err
 		}
 		return a.runRouterExec(ctx, command.Topology, layout, m, command.Args)
+	case "snapshot-list":
+		m, err := state.Load(layout.ManifestPath)
+		if err != nil {
+			return err
+		}
+		if m == nil {
+			return errors.New("topology is not up")
+		}
+		if err := validateManifestPaths(layout, m); err != nil {
+			return err
+		}
+		return a.snapshotList(m, command.Args)
+	case "snapshot-create", "snapshot-restore", "snapshot-delete":
+		m, err := state.Load(layout.ManifestPath)
+		if err != nil {
+			return err
+		}
+		if m == nil {
+			return errors.New("topology is not up")
+		}
+		// A restore can start VMs, so it makes the same checks as start.
+		if command.Name == "snapshot-restore" {
+			if err := a.runtimePreflight(ctx, command.Topology, command.Helpers); err != nil {
+				return err
+			}
+		} else if err := a.resolveImageHelper(command.Topology, command.Helpers); err != nil {
+			return err
+		}
+		if err := layout.Ensure(); err != nil {
+			return err
+		}
+		unlock, err := a.acquireLifecycleLocks(ctx, layout, true)
+		if err != nil {
+			return err
+		}
+		defer unlock()
+		if m, err = state.Load(layout.ManifestPath); err != nil {
+			return err
+		}
+		if m == nil {
+			return errors.New("topology is not up")
+		}
+		if m.Topology != command.Topology.Name {
+			return fmt.Errorf("manifest belongs to topology %q", m.Topology)
+		}
+		if err := a.configureLVM(command.Topology, m, command.Helpers); err != nil {
+			return err
+		}
+		if err := validateManifestPaths(layout, m); err != nil {
+			return err
+		}
+		if networkState, err := manifestNetwork(m); err != nil {
+			return err
+		} else if err := validateManifestNetwork(layout, networkState); err != nil {
+			return err
+		}
+		switch command.Name {
+		case "snapshot-create":
+			return a.snapshotCreate(ctx, command.Topology, layout, m, command.Args)
+		case "snapshot-restore":
+			return a.snapshotRestore(ctx, command.Topology, layout, m, command.Args)
+		default:
+			return a.snapshotDelete(ctx, command.Topology, layout, m, command.Args)
+		}
 	case "up", "start", "stop", "restart", "down":
 		hard, args := false, command.Args
 		if command.Name == "stop" {
@@ -471,6 +552,20 @@ func diskAIOs(disks []*config.Disk) []string {
 	return values
 }
 
+// resolveImageHelper selects the qemu-img executable, including the
+// --qemu-img override, for a command that does not need the full preflight.
+func (a *App) resolveImageHelper(cfg *config.Config, overrides HelperOverrides) error {
+	if len(cfg.VMs) == 0 || (a.Images != nil && !a.imagesDefault) {
+		return nil
+	}
+	paths, err := preflight.ResolveHelperPaths(true, preflight.HelperPaths{QEMUSystem: overrides.QEMUSystem, QEMUImg: overrides.QEMUImg, OVMFCode: overrides.OVMFCode, OVMFVars: overrides.OVMFVars, Xorriso: overrides.Xorriso}, nil, nil)
+	if err != nil {
+		return err
+	}
+	a.Images = qemu.NewImageManager(nil, paths.QEMUImg)
+	return nil
+}
+
 func (a *App) configureLVM(cfg *config.Config, manifest *state.Manifest, overrides HelperOverrides) error {
 	needsLVM := false
 	for _, s := range cfg.Storages {
@@ -533,6 +628,9 @@ func (a *App) up(ctx context.Context, cfg *config.Config, layout state.Layout, o
 		return err
 	}
 	if err := a.validateExisting(ctx, old, desired); err != nil {
+		return err
+	}
+	if err := validateSnapshotsForUp(old, desired); err != nil {
 		return err
 	}
 	vgLocks, err := a.planStorages(ctx, cfg, layout, old)
@@ -882,6 +980,9 @@ func (a *App) start(ctx context.Context, cfg *config.Config, layout state.Layout
 	if m == nil {
 		return errors.New("topology is not up")
 	}
+	if err := refuseRestoringDisks(m); err != nil {
+		return err
+	}
 	vgLocks, err := a.planStorages(ctx, cfg, layout, m)
 	if err != nil {
 		return err
@@ -949,6 +1050,9 @@ func (a *App) stop(ctx context.Context, cfg *config.Config, layout state.Layout,
 func (a *App) restart(ctx context.Context, cfg *config.Config, layout state.Layout, m *state.Manifest, args []string) error {
 	if m == nil {
 		return errors.New("topology is not up")
+	}
+	if err := refuseRestoringDisks(m); err != nil {
+		return err
 	}
 	vgLocks, err := a.planStorages(ctx, cfg, layout, m)
 	if err != nil {
@@ -1136,6 +1240,10 @@ func (a *App) down(ctx context.Context, cfg *config.Config, layout state.Layout,
 		if err := a.Network.Remove(ctx, n); err != nil {
 			return err
 		}
+	}
+	// Snapshot LVs are in the thin pools, so they go before the storages.
+	if err := a.removeAllSnapshots(ctx, layout, m); err != nil {
+		return err
 	}
 	for name, n := range m.Nodes {
 		if err := a.removeRecordedNode(ctx, layout, name, n, m.Storages); err != nil {

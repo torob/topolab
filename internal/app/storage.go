@@ -190,6 +190,16 @@ func (a *App) planStorages(ctx context.Context, cfg *config.Config, _ state.Layo
 				}
 			}
 		}
+		for _, name := range sortedSnapshotNames(m) {
+			snapshot := m.Snapshots[name]
+			for _, vmName := range sortedSnapshotVMs(snapshot) {
+				for _, sd := range snapshot.VMs[vmName].Disks {
+					if sd.LVName != "" {
+						known[sd.LVName] = true
+					}
+				}
+			}
+		}
 		marker := "topolab.topology." + state.ShortID(cfg.Name, 16)
 		for _, vg := range byUUID {
 			lvs, e := a.LVM.LVs(ctx, vg.Name)
@@ -322,7 +332,9 @@ func (a *App) verifyManifestStorage(ctx context.Context, m *state.Manifest, allo
 			}
 			lv, found := storagepkg.FindLV(lvs, d.LVName)
 			if !found {
-				if !allowAbsent && !(d.Pending != "" && d.LVUUID == "") {
+				// A snapshot restore removes the disk LV before it records the
+				// removal, so a retry can find it absent.
+				if !allowAbsent && !(d.Pending != "" && d.LVUUID == "") && d.Pending != "restore" {
 					return fmt.Errorf("recorded disk LV %s/%s is absent", d.VolumeGroup, d.LVName)
 				}
 			} else {
@@ -358,6 +370,34 @@ func (a *App) verifyManifestStorage(ctx context.Context, m *state.Manifest, allo
 					if !storagepkg.HasTags(stage.Tags, []string{"topolab.kind.staging"}) || !storagepkg.HasTags(stage.Tags, d.OwnershipTags) || (d.PoolName != "" && stage.Pool != d.PoolName) {
 						return fmt.Errorf("staging LV %s identity or ownership changed", d.StagingName)
 					}
+				}
+			}
+		}
+	}
+	for _, name := range sortedSnapshotNames(m) {
+		snapshot := m.Snapshots[name]
+		for _, vmName := range sortedSnapshotVMs(snapshot) {
+			vm := snapshot.VMs[vmName]
+			for _, sd := range vm.Disks {
+				if sd.StorageType != "lvm-thin" {
+					continue
+				}
+				remember(sd.VolumeGroup, sd.LVName)
+				lvs, err := lvsFor(sd.VolumeGroup)
+				if err != nil {
+					return err
+				}
+				lv, found := storagepkg.FindLV(lvs, sd.LVName)
+				if !found {
+					// A create can stop before it makes the LV, and a delete
+					// can stop after it removes the LV.
+					if !allowAbsent && snapshot.Pending != state.SnapshotPendingCreate && vm.Pending != state.SnapshotPendingDelete {
+						return fmt.Errorf("snapshot %s LV %s/%s of VM %s disk %s is absent", name, sd.VolumeGroup, sd.LVName, vmName, sd.Name)
+					}
+					continue
+				}
+				if (sd.LVUUID != "" && lv.UUID != sd.LVUUID) || !storagepkg.HasTags(lv.Tags, sd.OwnershipTags) || lv.Pool != sd.PoolName {
+					return fmt.Errorf("snapshot %s LV %s/%s identity or ownership changed", name, sd.VolumeGroup, sd.LVName)
 				}
 			}
 		}
@@ -558,7 +598,7 @@ func (a *App) diskExists(ctx context.Context, d *state.Disk) (bool, error) {
 	if d.StorageType == "lvm-thick" && (lv.Pool != "" || lv.Origin != "") {
 		return false, fmt.Errorf("thick disk %s is unexpectedly thin or has an origin", d.Name)
 	}
-	if d.StorageType == "lvm-thin" && d.Provisioning != "snapshot" && lv.Origin != "" {
+	if d.StorageType == "lvm-thin" && d.OriginName == "" && d.Provisioning != "snapshot" && lv.Origin != "" {
 		return false, fmt.Errorf("independent thin disk %s unexpectedly has origin %q", d.Name, lv.Origin)
 	}
 	if d.OriginName != "" {
@@ -952,17 +992,54 @@ func (a *App) removeDisk(ctx context.Context, d *state.Disk) error {
 	if err != nil {
 		return err
 	}
+	// An interrupted creation or snapshot restore can leave its staging LV.
+	if d.StagingName != "" {
+		if stage, found := storagepkg.FindLV(lvs, d.StagingName); found {
+			if (d.StagingUUID != "" && stage.UUID != d.StagingUUID) || !storagepkg.HasTags(stage.Tags, []string{"topolab.kind.staging"}) || !storagepkg.HasTags(stage.Tags, d.OwnershipTags) || (d.PoolName != "" && stage.Pool != d.PoolName) {
+				return fmt.Errorf("refusing removal of unverified staging LV %s/%s", d.VolumeGroup, d.StagingName)
+			}
+			if err := a.LVM.Remove(ctx, d.VolumeGroup, d.StagingName); err != nil {
+				return err
+			}
+		}
+	}
 	lv, ok := storagepkg.FindLV(lvs, d.LVName)
 	if !ok {
 		return nil
 	}
-	if d.LVUUID == "" || lv.UUID != d.LVUUID || (d.VGUUID != "" && lv.VGUUID != d.VGUUID) || !storagepkg.HasTags(lv.Tags, d.OwnershipTags) {
+	// After a rename, an interrupted creation or restore has the staging UUID
+	// on the published LV and no recorded LV UUID.
+	published := d.LVUUID != "" && lv.UUID == d.LVUUID
+	staged := d.LVUUID == "" && d.StagingUUID != "" && lv.UUID == d.StagingUUID
+	if !(published || staged) || (d.VGUUID != "" && lv.VGUUID != d.VGUUID) || !storagepkg.HasTags(lv.Tags, d.OwnershipTags) {
 		return fmt.Errorf("refusing removal of unverified LV %s/%s", d.VolumeGroup, d.LVName)
 	}
 	if d.PoolName != "" && lv.Pool != d.PoolName {
 		return fmt.Errorf("refusing removal of LV %s with unexpected pool", d.LVName)
 	}
 	return a.LVM.Remove(ctx, d.VolumeGroup, d.LVName)
+}
+
+func sortedSnapshotNames(m *state.Manifest) []string {
+	var names []string
+	for name, snapshot := range m.Snapshots {
+		if snapshot != nil {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+func sortedSnapshotVMs(s *state.Snapshot) []string {
+	var names []string
+	for name, vm := range s.VMs {
+		if vm != nil {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 func (a *App) removeStorage(ctx context.Context, topology string, s *state.Storage) error {

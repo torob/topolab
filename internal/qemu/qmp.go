@@ -139,6 +139,42 @@ func (c *QMPClient) Powerdown(ctx context.Context) error {
 }
 func (c *QMPClient) Quit(ctx context.Context) error { return c.Execute(ctx, "quit", nil, nil) }
 
+// Pause stops the guest CPUs. Before QMP stop returns, QEMU completes the
+// pending disk requests and flushes the disks.
+func (c *QMPClient) Pause(ctx context.Context) error { return c.Execute(ctx, "stop", nil, nil) }
+
+// Resume lets a paused guest continue.
+func (c *QMPClient) Resume(ctx context.Context) error { return c.Execute(ctx, "cont", nil, nil) }
+
+// SnapshotInternal takes an internal qcow2 snapshot with the tag name of each
+// block node in one transaction, so all the disks of a VM get the snapshot at
+// the same instant. If one action fails, QEMU makes none of them.
+func (c *QMPClient) SnapshotInternal(ctx context.Context, name string, blockNodes []string) error {
+	if name == "" || len(blockNodes) == 0 {
+		return errors.New("snapshot name and block nodes are required")
+	}
+	actions := make([]map[string]any, 0, len(blockNodes))
+	for _, node := range blockNodes {
+		if node == "" {
+			return errors.New("block node is required")
+		}
+		actions = append(actions, map[string]any{
+			"type": "blockdev-snapshot-internal-sync",
+			"data": map[string]any{"device": node, "name": name},
+		})
+	}
+	return c.Execute(ctx, "transaction", map[string]any{"actions": actions}, nil)
+}
+
+// DeleteSnapshotInternal removes the internal qcow2 snapshot with the tag name
+// from a block node of a running VM.
+func (c *QMPClient) DeleteSnapshotInternal(ctx context.Context, blockNode, name string) error {
+	if blockNode == "" || name == "" {
+		return errors.New("block node and snapshot name are required")
+	}
+	return c.Execute(ctx, "blockdev-snapshot-delete-internal-sync", map[string]any{"device": blockNode, "name": name}, nil)
+}
+
 func (c *QMPClient) QueryBalloon(ctx context.Context) (uint64, error) {
 	var value struct {
 		Actual uint64 `json:"actual"`

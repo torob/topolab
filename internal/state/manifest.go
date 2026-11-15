@@ -12,7 +12,14 @@ import (
 	"time"
 )
 
-const ManifestVersion = 3
+// ManifestVersion is the version that Save writes. Version 4 adds topology
+// snapshots. Load also reads version 3, which has no snapshots, and the next
+// Save writes it as version 4. A TopoLab without snapshot support refuses a
+// version-4 manifest, so it cannot leave snapshot LVs behind in down.
+const ManifestVersion = 4
+
+// previousManifestVersion is the older version that Load still reads.
+const previousManifestVersion = 3
 
 type Manifest struct {
 	Version                  int                                 `json:"version"`
@@ -33,9 +40,84 @@ type Manifest struct {
 	// NetworkState is the network package's versioned, ownership-bearing state.
 	// Keeping it opaque here avoids making the persistent state package depend
 	// on a Linux implementation package.
-	NetworkState json.RawMessage     `json:"network_state,omitempty"`
-	Helpers      map[string]*Helper  `json:"helpers,omitempty"`
-	Storages     map[string]*Storage `json:"storages,omitempty"`
+	NetworkState json.RawMessage      `json:"network_state,omitempty"`
+	Helpers      map[string]*Helper   `json:"helpers,omitempty"`
+	Storages     map[string]*Storage  `json:"storages,omitempty"`
+	Snapshots    map[string]*Snapshot `json:"snapshots,omitempty"`
+}
+
+// Snapshot values of Pending and SnapshotVM.Consistency.
+const (
+	SnapshotPendingCreate  = "create"
+	SnapshotPendingRestore = "restore"
+	SnapshotPendingDelete  = "delete"
+
+	SnapshotFrozen          = "frozen"
+	SnapshotCrashConsistent = "crash-consistent"
+	SnapshotStopped         = "stopped"
+)
+
+// Snapshot is one named topology snapshot. It holds the disks and the OVMF
+// variables of each VM that it contains. It does not hold guest RAM.
+type Snapshot struct {
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"`
+	// Pending is "create" or "restore" while that operation is incomplete.
+	Pending string                 `json:"pending,omitempty"`
+	VMs     map[string]*SnapshotVM `json:"vms"`
+	// Restore is the write-ahead record of an incomplete restore.
+	Restore *SnapshotRestore `json:"restore,omitempty"`
+}
+
+// SnapshotVM is the part of a snapshot that belongs to one VM.
+type SnapshotVM struct {
+	// StorageIdentityHash is the VM's storage identity at create time. A
+	// restore needs the same root disk identity.
+	StorageIdentityHash string `json:"storage_identity_hash"`
+	// Running is true when the VM ran at create time.
+	Running bool `json:"running"`
+	// Consistency is frozen, crash-consistent, or stopped.
+	Consistency    string         `json:"consistency,omitempty"`
+	OVMFVarsPath   string         `json:"ovmf_vars_path"`
+	OVMFVarsDigest string         `json:"ovmf_vars_digest,omitempty"`
+	Disks          []SnapshotDisk `json:"disks"`
+	// Pending is "delete" while the delete of this VM part is incomplete.
+	Pending string `json:"pending,omitempty"`
+}
+
+// SnapshotDisk is the saved state of one VM disk. A qcow2 disk keeps an
+// internal snapshot with the snapshot name as its tag. An lvm-thin disk has a
+// read-only thin snapshot LV.
+type SnapshotDisk struct {
+	Name          string   `json:"name"`
+	Storage       string   `json:"storage"`
+	StorageType   string   `json:"storage_type"`
+	Format        string   `json:"format"`
+	CapacityBytes uint64   `json:"capacity_bytes"`
+	VolumeGroup   string   `json:"volume_group,omitempty"`
+	LVName        string   `json:"lv_name,omitempty"`
+	LVUUID        string   `json:"lv_uuid,omitempty"`
+	PoolName      string   `json:"pool_name,omitempty"`
+	OwnershipTags []string `json:"ownership_tags,omitempty"`
+}
+
+// Phases of SnapshotRestore. In the restore phase the selected VMs are stopped
+// and their disks change. In the start phase all disks are restored and only
+// the VMs that ran before the restore still have to start.
+const (
+	SnapshotRestorePhaseRestore = "restore"
+	SnapshotRestorePhaseStart   = "start"
+)
+
+// SnapshotRestore records an incomplete restore, so that a retry restores the
+// same VMs and starts the VMs that ran before the first attempt.
+type SnapshotRestore struct {
+	Phase string   `json:"phase"`
+	VMs   []string `json:"vms"`
+	// Running lists the selected VMs that ran before the restore.
+	Running []string `json:"running,omitempty"`
+	// Restored lists the VMs whose disks and variables are restored.
+	Restored []string `json:"restored,omitempty"`
 }
 
 // Storage records the identity of a declared backend and any TopoLab-owned
@@ -181,7 +263,7 @@ type OwnedResource struct {
 }
 
 func NewManifest(topology string) *Manifest {
-	return &Manifest{Version: ManifestVersion, Topology: topology, Nodes: make(map[string]*Node), Links: make(map[string]*Link), ManagementHostInterfaces: make(map[string]*ManagementHostInterface), Helpers: make(map[string]*Helper), Storages: make(map[string]*Storage)}
+	return &Manifest{Version: ManifestVersion, Topology: topology, Nodes: make(map[string]*Node), Links: make(map[string]*Link), ManagementHostInterfaces: make(map[string]*ManagementHostInterface), Helpers: make(map[string]*Helper), Storages: make(map[string]*Storage), Snapshots: make(map[string]*Snapshot)}
 }
 
 func Load(path string) (*Manifest, error) {
@@ -199,7 +281,7 @@ func Load(path string) (*Manifest, error) {
 	if err := dec.Decode(&m); err != nil {
 		return nil, fmt.Errorf("decode manifest: %w", err)
 	}
-	if m.Version != ManifestVersion {
+	if m.Version != ManifestVersion && m.Version != previousManifestVersion {
 		return nil, fmt.Errorf("unsupported manifest version %d", m.Version)
 	}
 	if err := ensureEOF(dec); err != nil {

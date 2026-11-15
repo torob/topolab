@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -435,5 +436,195 @@ func TestPCIAllocatorReservesQ35SouthbridgeSlot(t *testing.T) {
 	}
 	if _, err := allocator.Next(); err == nil {
 		t.Fatal("allocator used reserved q35 slot 0x1f")
+	}
+}
+
+// qmpRecorder answers every QMP command after the greeting with an empty
+// return value and records the requests.
+func qmpRecorder(t *testing.T, commands int) (*QMPClient, chan []map[string]any) {
+	t.Helper()
+	server, client := net.Pipe()
+	done := make(chan []map[string]any, 1)
+	go func() {
+		defer server.Close()
+		enc := json.NewEncoder(server)
+		dec := json.NewDecoder(bufio.NewReader(server))
+		_ = enc.Encode(map[string]any{"QMP": map[string]any{"version": map[string]any{}}})
+		var requests []map[string]any
+		for i := 0; i < commands; i++ {
+			var req map[string]any
+			if err := dec.Decode(&req); err != nil {
+				break
+			}
+			requests = append(requests, req)
+			_ = enc.Encode(map[string]any{"return": map[string]any{}, "id": req["id"]})
+		}
+		done <- requests
+	}()
+	return NewQMPClient("unused", func(context.Context, string, string) (net.Conn, error) { return client, nil }), done
+}
+
+func TestQMPSnapshotCommands(t *testing.T) {
+	q, done := qmpRecorder(t, 5)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := q.Pause(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.SnapshotInternal(ctx, "base", []string{"blk-a", "blk-b"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.DeleteSnapshotInternal(ctx, "blk-a", "base"); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Resume(ctx); err != nil {
+		t.Fatal(err)
+	}
+	_ = q.Close()
+	requests := <-done
+	var names []string
+	for _, req := range requests {
+		names = append(names, req["execute"].(string))
+	}
+	if strings.Join(names, " ") != "qmp_capabilities stop transaction blockdev-snapshot-delete-internal-sync cont" {
+		t.Fatalf("commands = %v", names)
+	}
+	actions := requests[2]["arguments"].(map[string]any)["actions"].([]any)
+	if len(actions) != 2 {
+		t.Fatalf("actions = %#v", actions)
+	}
+	for i, node := range []string{"blk-a", "blk-b"} {
+		action := actions[i].(map[string]any)
+		data := action["data"].(map[string]any)
+		if action["type"] != "blockdev-snapshot-internal-sync" || data["device"] != node || data["name"] != "base" {
+			t.Fatalf("action %d = %#v", i, action)
+		}
+	}
+	deleted := requests[3]["arguments"].(map[string]any)
+	if deleted["device"] != "blk-a" || deleted["name"] != "base" {
+		t.Fatalf("delete arguments = %#v", deleted)
+	}
+	if err := q.SnapshotInternal(ctx, "base", nil); err == nil {
+		t.Fatal("a snapshot without block nodes was accepted")
+	}
+}
+
+// guestAgentServer serves one guest-agent connection on a Unix socket. It
+// answers the sync request, then sends an old event line and the reply.
+func guestAgentServer(t *testing.T, reply string) (string, chan string) {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "tlqga-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	path := filepath.Join(dir, "qga.sock")
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	commands := make(chan string, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		reader := bufio.NewReader(conn)
+		for {
+			line, err := reader.ReadBytes('\n')
+			if err != nil {
+				return
+			}
+			for len(line) > 0 && line[0] == 0xff {
+				line = line[1:]
+			}
+			var req struct {
+				Execute   string `json:"execute"`
+				Arguments struct {
+					ID json.RawMessage `json:"id"`
+				} `json:"arguments"`
+			}
+			if json.Unmarshal(line, &req) != nil {
+				continue
+			}
+			if req.Execute == "guest-sync-delimited" {
+				// The id does not fit in a float64, so echo its exact text.
+				_, _ = conn.Write([]byte{0xff})
+				_, _ = fmt.Fprintf(conn, "{\"return\": %s}\n", req.Arguments.ID)
+				continue
+			}
+			commands <- req.Execute
+			_, _ = conn.Write([]byte("not json\n" + reply + "\n"))
+			return
+		}
+	}()
+	return path, commands
+}
+
+func TestGuestAgentExecuteSynchronizesAndReturnsResult(t *testing.T) {
+	path, commands := guestAgentServer(t, `{"return": 2}`)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	result, err := GuestAgentExecute(ctx, path, "guest-fsfreeze-freeze")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(result) != "2" || <-commands != "guest-fsfreeze-freeze" {
+		t.Fatalf("result = %s", result)
+	}
+}
+
+func TestGuestAgentExecuteReturnsAgentError(t *testing.T) {
+	path, _ := guestAgentServer(t, `{"error": {"class": "GenericError", "desc": "freeze failed"}}`)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err := GuestAgentExecute(ctx, path, "guest-fsfreeze-freeze")
+	if err == nil || !strings.Contains(err.Error(), "freeze failed") {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := GuestAgentExecute(ctx, "", "guest-fsfreeze-thaw"); err == nil {
+		t.Fatal("an empty socket path was accepted")
+	}
+}
+
+func TestImageSnapshotCommandsAndInfo(t *testing.T) {
+	var calls []string
+	manager := NewImageManager(runnerFunc(func(_ context.Context, name string, args ...string) ([]byte, error) {
+		calls = append(calls, name+" "+strings.Join(args, " "))
+		if args[0] == "info" {
+			return []byte(`{"format":"qcow2","virtual-size":1024,"snapshots":[{"id":"1","name":"base"}]}`), nil
+		}
+		return nil, nil
+	}), "/bin/qemu-img")
+	ctx := context.Background()
+	if err := manager.SnapshotCreate(ctx, "/d.qcow2", "base"); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.SnapshotApply(ctx, "/d.qcow2", "base"); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.SnapshotDelete(ctx, "/d.qcow2", "base"); err != nil {
+		t.Fatal(err)
+	}
+	info, err := manager.Info(ctx, "/d.qcow2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.HasSnapshot("base") || info.HasSnapshot("other") {
+		t.Fatalf("snapshots = %#v", info.Snapshots)
+	}
+	want := []string{
+		"/bin/qemu-img snapshot -c base /d.qcow2",
+		"/bin/qemu-img snapshot -a base /d.qcow2",
+		"/bin/qemu-img snapshot -d base /d.qcow2",
+		"/bin/qemu-img info --force-share --output=json /d.qcow2",
+	}
+	if strings.Join(calls, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("calls:\n%s", strings.Join(calls, "\n"))
+	}
+	if err := manager.SnapshotCreate(ctx, "/d.qcow2", ""); err == nil {
+		t.Fatal("an empty tag was accepted")
 	}
 }

@@ -66,6 +66,8 @@ sudo WORKING_DIR=/var/tmp/topolab topolab -f topology.yml \
   exec -- ssh user@management-address
 sudo WORKING_DIR=/var/tmp/topolab topolab -f topology.yml \
   router exec edge -- ip route show
+sudo WORKING_DIR=/var/tmp/topolab topolab -f topology.yml snapshot create base
+sudo WORKING_DIR=/var/tmp/topolab topolab -f topology.yml snapshot restore base
 sudo WORKING_DIR=/var/tmp/topolab topolab -f topology.yml down
 topolab version
 ```
@@ -89,8 +91,8 @@ with supplementary groups and `HOME`/`USER`/`LOGNAME` reset; `--user` selects
 another local passwd entry. Root is retained only by the small supervisor that
 holds the lock and reaps the child. While `exec` runs, `up`, `stop`, `restart`
 and `down` wait for the lock and write `waiting for the topology lock` to
-stderr. `start` and `stop --hard` change only VMs, so they do not wait for
-`exec` or `router exec`.
+stderr. `start`, `stop --hard`, and the `snapshot` commands change only VMs,
+so they do not wait for `exec` or `router exec`.
 
 TopoLab keeps two locks for each topology under `WORKING_DIR/.topolab/locks/`.
 The network lock (`<topology>.lock`) protects the namespaces, routers,
@@ -102,10 +104,12 @@ first and the VM lock second:
 | --- | --- | --- |
 | `exec`, `router exec` | shared | - |
 | `start`, `stop --hard` | shared | exclusive |
+| `snapshot create`, `snapshot restore`, `snapshot delete` | shared | exclusive |
 | `stop`, `restart`, `up`, `down` | exclusive | exclusive |
 
-So only one command changes VMs at a time, and `start` and `stop --hard` run
-while `exec` commands run. The normal `stop` keeps its exclusive network lock.
+So only one command changes VMs at a time, and `start`, `stop --hard`, and
+the `snapshot` commands run while `exec` commands run. `snapshot list` takes
+no lock. The normal `stop` keeps its exclusive network lock.
 
 `router exec NAME [--user USER] [--cwd DIR] -- COMMAND...` provides the same
 direct-exec, locking, stdio, TTY, signal, and exit-status behavior in a
@@ -195,6 +199,77 @@ because QEMU writes its disk data to the host before it exits. A host crash or
 a host power loss can still lose data and break an image, because that data
 can still be only in the host page cache.
 
+## Snapshots
+
+A snapshot saves the disks and the OVMF variables of VMs under a name, so
+that you can bring the topology back to that point later. Run
+`topolab snapshot --help` for a summary.
+
+```text
+topolab snapshot create  NAME [NODE...]
+topolab snapshot restore NAME [NODE...]
+topolab snapshot delete  NAME [NODE...]
+topolab snapshot list    [--format table|json]
+```
+
+Without `NODE`, `create` saves all VMs of the topology, and `restore` and
+`delete` use all VMs of the snapshot. `NAME` uses lowercase letters, digits,
+`.`, `_`, and `-`, with at most 63 characters.
+
+- A snapshot does not save RAM. A restore boots the restored VMs again.
+- `file` disks get a qcow2 internal snapshot with the snapshot name as its
+  tag. `lvm-thin` disks get a read-only thin snapshot LV (`tlx-...`) in their
+  pool. A VM with an `lvm-thick` disk cannot be in a snapshot.
+- Snapshot LVs use space in the thin pool when the disks change. The pool
+  utilization warnings of `ps` include this space.
+
+`create` works on running and stopped VMs, also in the same snapshot. A
+stopped VM is saved directly. For the running VMs, TopoLab:
+
+1. freezes the guest file systems of each VM that has `guest_agent: true` and
+   a responsive `qemu-ga`;
+2. pauses all running VMs at the same moment with QMP `stop`, so all of them
+   are saved at the same point in time;
+3. saves the disks and copies the OVMF variables;
+4. lets the VMs continue and thaws their file systems.
+
+The pause is short: qcow2 disks add almost no time, and each `lvm-thin` disk
+adds some hundred milliseconds. The output shows the consistency of each VM:
+
+```text
+NAME	STATE	CONSISTENCY
+web1	running	frozen
+web2	running	crash-consistent
+db1	stopped	stopped
+```
+
+`frozen` means clean file systems. `crash-consistent` is the same state as
+after a power loss: the VM has no guest agent, the agent did not answer, or
+the freeze failed (TopoLab then writes a warning). A journaling file system
+recovers at the next boot.
+
+`restore` keeps the run state that each VM has before the restore. TopoLab
+stops each running VM with the `stop --hard` method, restores its disks and
+OVMF variables, and starts it again. A VM that was stopped before the restore
+stays stopped. Other VMs keep running. If a disk grew after the snapshot, it
+keeps its new size. If a restore is interrupted, run the same command again
+to complete it; until then, `up`, `start`, and `restart` refuse to run.
+
+```text
+NAME	BEFORE	RESULT	AFTER
+web1	running	restored	running
+db1	stopped	restored	stopped
+```
+
+If you restore only some VMs of a cluster, for example of etcd or a
+replicated database, their state is older than the state of the other
+members. TopoLab cannot detect this.
+
+`up` refuses a change that destroys snapshot data: a template change, a VM
+removal, or a disk removal of a VM in a snapshot. Delete the snapshot, or only
+that VM from it (`topolab snapshot delete NAME NODE`), first. New VMs, new
+disks, and disk growth are allowed. `down` deletes all snapshots.
+
 ## Explicit storage backends
 
 Every root and additional disk names a top-level storage; there is no implicit,
@@ -274,8 +349,12 @@ TopoLab overwrite the full LV before publishing each new disk. Both default to
 `false`. Disabling them can expose stale VG data through unwritten portions of
 allocated storage. Because guest discards return thin chunks to the pool while
 VMs run, another thin LV can get those chunks; set `zero_new_blocks: true`
-when VMs must not see data that other VMs wrote. Manifest version 3 is not backward compatible; tear down an
-active topology with the previous TopoLab version before upgrading.
+when VMs must not see data that other VMs wrote. Manifest version 4 adds
+snapshots. TopoLab reads a version-3 manifest and writes it as version 4, so
+an active topology from the previous version keeps working. An older TopoLab
+refuses a version-4 manifest; tear down with the new version before a
+downgrade. Manifest versions 1 and 2 are not supported; tear down such a
+topology with the TopoLab version that created it.
 
 The former top-level `host` key is intentionally unsupported. Rename it to
 `management_host`; if the topology is active under the legacy root datapath,
@@ -307,6 +386,7 @@ sudo python3 e2e/services/test.py
 sudo python3 e2e/vm-features/test.py
 sudo python3 e2e/storage/test.py
 sudo python3 e2e/power-loss/test.py
+sudo python3 e2e/snapshot/test.py
 ```
 
 The power-loss suite runs 3 VMs with `cache: unsafe` disks. After
@@ -316,6 +396,17 @@ same recovery as the next boot (ext4 journal replay, FAT dirty bit), then
 `e2fsck -fn` or `fsck.fat -n` must find no error. After `start`, the guest
 kernels must report no filesystem error. Set `TOPOLAB_E2E_POWER_LOSS_MEMORY_MB`
 to change the memory of each VM (default 1024).
+
+The snapshot suite runs 3 VMs with `file` and `lvm-thin` disks. It installs
+`qemu-guest-agent` in one guest through an external router, so it needs
+Internet access from the guest. It checks that `snapshot create` freezes and
+pauses the running VMs without a reboot, that `up` refuses to remove a VM in
+the snapshot, that `snapshot restore` brings back the guest files and the
+data-disk contents and keeps the run state and the grown disk sizes, and that
+`down` removes every snapshot LV. Set `TOPOLAB_E2E_VG` to an existing VG with
+at least 16 GiB free. Without it, the suite creates a sparse 16-GiB backing
+file under `/var/tmp`, a loop PV, and a `tlsnap-*` VG, and removes them at the
+end.
 
 The VM suites automatically download the official Ubuntu 26.04 amd64 cloud
 image from pinned release `20260720`, verify its SHA-256, and cache it under

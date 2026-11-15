@@ -273,6 +273,12 @@ func BaseName(topology, storage, digest string) string {
 func StagingName(topology, node, disk string) string {
 	return "tls-" + state.ShortID(topology+"\x00"+node+"\x00"+disk, 24)
 }
+
+// SnapshotLVName is the read-only thin snapshot LV of one disk in one topology
+// snapshot.
+func SnapshotLVName(topology, node, disk, snapshot string) string {
+	return "tlx-" + state.ShortID(topology+"\x00"+node+"\x00"+disk+"\x00"+snapshot, 24)
+}
 func Tags(topology, storageName, kind string) []string {
 	return []string{"topolab", "topolab.topology." + state.ShortID(topology, 16), "topolab.storage." + state.ShortID(storageName, 16), "topolab.kind." + kind}
 }

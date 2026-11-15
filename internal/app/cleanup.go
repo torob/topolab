@@ -42,6 +42,16 @@ func verifyTopologyTree(layout state.Layout, m *state.Manifest) error {
 			}
 		}
 	}
+	for _, snapshot := range m.Snapshots {
+		if snapshot == nil {
+			continue
+		}
+		for _, vm := range snapshot.VMs {
+			if vm != nil && vm.OVMFVarsPath != "" {
+				allowed[vm.OVMFVarsPath] = true
+			}
+		}
+	}
 	err := filepath.WalkDir(layout.TopologyDir, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -159,6 +169,9 @@ func validateManifestPaths(layout state.Layout, m *state.Manifest) error {
 			}
 		}
 	}
+	if err := validateManifestSnapshots(layout, m); err != nil {
+		return err
+	}
 	for key, h := range m.Helpers {
 		if h == nil || h.Kind != "dnsmasq" || key != h.Router+":"+h.Interface {
 			return fmt.Errorf("manifest helper %q is invalid", key)
@@ -234,12 +247,77 @@ func validateManifestDiskBackend(m *state.Manifest, node string, d *state.Disk, 
 					matched = true
 				}
 			}
-			if !matched {
+			// A restored thin disk is a thin snapshot of its snapshot LV.
+			if !matched && !snapshotOrigin(m, node, d) {
 				return fmt.Errorf("thin snapshot has inconsistent origin identity")
 			}
 		}
 	default:
 		return fmt.Errorf("disk has unsupported storage type %q", d.StorageType)
+	}
+	return nil
+}
+
+// validateManifestSnapshots checks that every recorded snapshot path and LV
+// identity is the deterministic one, before a command removes or changes it.
+func validateManifestSnapshots(layout state.Layout, m *state.Manifest) error {
+	for name, snapshot := range m.Snapshots {
+		if snapshot == nil || snapshot.Name != name || !state.ValidSnapshotName(name) {
+			return fmt.Errorf("manifest snapshot %q is invalid", name)
+		}
+		switch snapshot.Pending {
+		case "", state.SnapshotPendingCreate, state.SnapshotPendingRestore:
+		default:
+			return fmt.Errorf("manifest snapshot %s has invalid pending operation %q", name, snapshot.Pending)
+		}
+		if r := snapshot.Restore; r != nil {
+			if r.Phase != state.SnapshotRestorePhaseRestore && r.Phase != state.SnapshotRestorePhaseStart {
+				return fmt.Errorf("manifest snapshot %s has invalid restore phase %q", name, r.Phase)
+			}
+			for _, vmName := range append(append(append([]string(nil), r.VMs...), r.Running...), r.Restored...) {
+				if snapshot.VMs[vmName] == nil {
+					return fmt.Errorf("manifest snapshot %s restores unknown VM %q", name, vmName)
+				}
+			}
+		}
+		for vmName, vm := range snapshot.VMs {
+			if vm == nil {
+				return fmt.Errorf("manifest snapshot %s VM %q is null", name, vmName)
+			}
+			if vm.Pending != "" && vm.Pending != state.SnapshotPendingDelete {
+				return fmt.Errorf("manifest snapshot %s VM %s has invalid pending operation %q", name, vmName, vm.Pending)
+			}
+			varsPath, err := layout.SnapshotVarsPath(name, vmName)
+			if err != nil {
+				return fmt.Errorf("manifest snapshot %s: %w", name, err)
+			}
+			if filepath.Clean(vm.OVMFVarsPath) != varsPath {
+				return fmt.Errorf("manifest snapshot %s VM %s has unsafe OVMF variables path %s", name, vmName, vm.OVMFVarsPath)
+			}
+			if err := rejectSymlinkComponents(layout.WorkingDir, vm.OVMFVarsPath); err != nil {
+				return fmt.Errorf("manifest snapshot %s VM %s: %w", name, vmName, err)
+			}
+			seen := map[string]bool{}
+			for _, sd := range vm.Disks {
+				if sd.Name == "" || seen[sd.Name] {
+					return fmt.Errorf("manifest snapshot %s VM %s has invalid disk name %q", name, vmName, sd.Name)
+				}
+				seen[sd.Name] = true
+				switch sd.StorageType {
+				case "", "file":
+					if sd.VolumeGroup != "" || sd.LVName != "" || sd.LVUUID != "" || sd.PoolName != "" || len(sd.OwnershipTags) != 0 {
+						return fmt.Errorf("manifest snapshot %s VM %s disk %s contains LVM identity", name, vmName, sd.Name)
+					}
+				case "lvm-thin":
+					expectedTags := storagepkg.Tags(m.Topology, sd.Storage, "snapshot")
+					if !storagepkg.ValidName(sd.VolumeGroup) || sd.LVName != storagepkg.SnapshotLVName(m.Topology, vmName, sd.Name, name) || sd.PoolName != storagepkg.PoolName(m.Topology, sd.Storage) || len(sd.OwnershipTags) != len(expectedTags) || !storagepkg.HasTags(sd.OwnershipTags, expectedTags) {
+						return fmt.Errorf("manifest snapshot %s VM %s disk %s has inconsistent LV identity", name, vmName, sd.Name)
+					}
+				default:
+					return fmt.Errorf("manifest snapshot %s VM %s disk %s has unsupported storage type %q", name, vmName, sd.Name, sd.StorageType)
+				}
+			}
+		}
 	}
 	return nil
 }

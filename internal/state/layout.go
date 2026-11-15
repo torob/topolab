@@ -14,6 +14,15 @@ const maxUnixSocketPath = 107
 
 var resourceName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$`)
 
+// snapshotName is the rule for a topology snapshot name. The name is also the
+// tag of the internal snapshot in each qcow2 disk.
+var snapshotName = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
+
+// ValidSnapshotName reports whether name is a valid snapshot name: lowercase
+// letters, digits, ".", "_", and "-", at most 63 characters, starting with a
+// letter or a digit.
+func ValidSnapshotName(name string) bool { return snapshotName.MatchString(name) }
+
 // Layout contains every state root used by a topology. Captures deliberately
 // live outside TopologyDir so Down can remove state without removing captures.
 type Layout struct {
@@ -30,6 +39,9 @@ type Layout struct {
 	NodesDir     string
 	LogsDir      string
 	SocketsDir   string
+	// SnapshotsDir holds one directory for each snapshot with the copies of
+	// the OVMF variables.
+	SnapshotsDir string
 }
 
 // NewLayout validates and resolves the working directory without creating it.
@@ -64,6 +76,7 @@ func NewLayout(workingDir, topology string) (Layout, error) {
 		NodesDir:     filepath.Join(topologyDir, "nodes"),
 		LogsDir:      filepath.Join(topologyDir, "logs"),
 		SocketsDir:   filepath.Join(topologyDir, "sockets"),
+		SnapshotsDir: filepath.Join(topologyDir, "snapshots"),
 	}
 	// Reserve room for a stable node-derived socket filename. Individual paths
 	// are checked again by SocketPath.
@@ -91,6 +104,27 @@ func (l Layout) NodeDir(node string) (string, error) {
 		return "", fmt.Errorf("invalid node name %q", node)
 	}
 	return filepath.Join(l.NodesDir, node), nil
+}
+
+// SnapshotDir returns the directory of one snapshot.
+func (l Layout) SnapshotDir(snapshot string) (string, error) {
+	if !ValidSnapshotName(snapshot) {
+		return "", fmt.Errorf("invalid snapshot name %q", snapshot)
+	}
+	return filepath.Join(l.SnapshotsDir, snapshot), nil
+}
+
+// SnapshotVarsPath returns the path of the OVMF variables copy of one VM in a
+// snapshot.
+func (l Layout) SnapshotVarsPath(snapshot, node string) (string, error) {
+	dir, err := l.SnapshotDir(snapshot)
+	if err != nil {
+		return "", err
+	}
+	if !resourceName.MatchString(node) {
+		return "", fmt.Errorf("invalid node name %q", node)
+	}
+	return filepath.Join(dir, node+".OVMF_VARS.fd"), nil
 }
 
 // SocketPath returns a deterministic socket path and enforces Linux's sockaddr_un limit.

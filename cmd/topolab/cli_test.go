@@ -207,3 +207,86 @@ func TestCLIPassesStopHardArgumentsUnchanged(t *testing.T) {
 		t.Fatalf("runtime command = %#v", runtime.command)
 	}
 }
+
+func TestCLISnapshotHelpNeedsNoTopologyOrRoot(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing.yml")
+	for _, args := range [][]string{{"snapshot", "--help"}, {"snapshot", "-h"}, {"snapshot", "create", "base", "--help"}, {"snapshot", "restore", "-h"}} {
+		var out, stderr bytes.Buffer
+		cli := CLI{Stdout: &out, Stderr: &stderr, EUID: func() int { return 1000 }}
+		if code := cli.Execute(context.Background(), append([]string{"--file", missing}, args...)); code != 0 {
+			t.Fatalf("%q: exit %d, stderr=%s", args, code, stderr.String())
+		}
+		help := strings.Join(strings.Fields(out.String()), " ")
+		for _, fragment := range []string{
+			"snapshot create NAME [NODE...]",
+			"snapshot restore NAME [NODE...]",
+			"snapshot delete NAME [NODE...]",
+			"snapshot list [--format table|json]",
+			"does not save the RAM",
+			"lvm-thick",
+			"pause at the same moment",
+			"crash-consistent",
+			"stop --hard method",
+			"stays stopped",
+			"run the same command again",
+			"NAME, BEFORE, RESULT and AFTER",
+			"topolab down deletes all snapshots",
+		} {
+			if !strings.Contains(help, fragment) {
+				t.Errorf("%q: snapshot help omits %q:\n%s", args, fragment, out.String())
+			}
+		}
+	}
+}
+
+func TestCLISnapshotRequiresSubcommand(t *testing.T) {
+	for _, args := range [][]string{{"snapshot"}, {"snapshot", "take", "base"}} {
+		var stderr bytes.Buffer
+		code := (CLI{Stdout: &bytes.Buffer{}, Stderr: &stderr}).Execute(context.Background(), args)
+		if code != 2 || !strings.Contains(stderr.String(), "create, restore, delete, or list") {
+			t.Errorf("args=%v code=%d stderr=%q", args, code, stderr.String())
+		}
+	}
+}
+
+func TestCLISnapshotSubcommandsBecomeRuntimeCommands(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "topology.yml")
+	if err := os.WriteFile(file, []byte("name: x\nrouters: [{name: r, interfaces: [{name: e, external: {sources: [10.0.0.0/24]}}]}]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		args []string
+		name string
+		rest string
+	}{
+		{[]string{"snapshot", "create", "base"}, "snapshot-create", "base"},
+		{[]string{"snapshot", "restore", "base", "vm1", "vm2"}, "snapshot-restore", "base|vm1|vm2"},
+		{[]string{"snapshot", "delete", "base", "vm1"}, "snapshot-delete", "base|vm1"},
+		{[]string{"snapshot", "list", "--format", "json"}, "snapshot-list", "--format|json"},
+	} {
+		runtime := &recordingRuntime{}
+		cli := CLI{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}, EUID: func() int { return 0 }, Runtime: runtime}
+		if code := cli.Execute(context.Background(), append([]string{"--file", file, "--working-dir", filepath.Join(dir, "work")}, test.args...)); code != 0 {
+			t.Fatalf("%q: exit %d", test.args, code)
+		}
+		if runtime.command.Name != test.name || strings.Join(runtime.command.Args, "|") != test.rest {
+			t.Errorf("%q: runtime command = %#v", test.args, runtime.command)
+		}
+	}
+	var stderr bytes.Buffer
+	code := (CLI{Stdout: &bytes.Buffer{}, Stderr: &stderr, EUID: func() int { return 1000 }}).Execute(context.Background(), []string{"--file", file, "--working-dir", filepath.Join(dir, "work"), "snapshot", "list"})
+	if code != 1 || !strings.Contains(stderr.String(), "snapshot list requires effective UID 0") {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+}
+
+func TestCLIUsageShowsSnapshotSyntax(t *testing.T) {
+	var stderr bytes.Buffer
+	if code := (CLI{Stdout: &bytes.Buffer{}, Stderr: &stderr}).Execute(context.Background(), nil); code != 2 {
+		t.Fatalf("exit %d", code)
+	}
+	if !strings.Contains(stderr.String(), "topolab snapshot create|restore|delete NAME [NODE...] | list") {
+		t.Fatalf("usage omits the snapshot syntax:\n%s", stderr.String())
+	}
+}

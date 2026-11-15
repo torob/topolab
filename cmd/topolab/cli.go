@@ -19,7 +19,11 @@ var commandNames = map[string]bool{
 	"capture": true, "counters": true, "start": true, "stop": true,
 	"restart": true, "down": true,
 	"exec": true, "router": true, "version": true,
+	"snapshot": true,
 }
+
+// snapshotSubcommands are the subcommands of `topolab snapshot`.
+var snapshotSubcommands = map[string]bool{"create": true, "restore": true, "delete": true, "list": true}
 
 // stopHelp is the output of `topolab stop --help`.
 const stopHelp = `usage: topolab [GLOBAL OPTIONS] stop [--hard] [NODE...]
@@ -51,6 +55,53 @@ the stop wait.
 Data note: like a real power loss, a hard stop loses the data that a guest did
 not flush. With cache: unsafe, a hard stop keeps the disk images consistent,
 but a host crash or a host power loss can still lose data and break an image.
+`
+
+// snapshotHelp is the output of `topolab snapshot --help`.
+const snapshotHelp = `usage: topolab [GLOBAL OPTIONS] snapshot create  NAME [NODE...]
+       topolab [GLOBAL OPTIONS] snapshot restore NAME [NODE...]
+       topolab [GLOBAL OPTIONS] snapshot delete  NAME [NODE...]
+       topolab [GLOBAL OPTIONS] snapshot list    [--format table|json]
+
+A snapshot saves the disks and the OVMF variables of VMs, so that you can
+bring them back to that point later. It does not save the RAM of the VMs, so
+a restore boots the VMs again. Without NODE, the command uses all VMs: all
+VMs of the topology for create, and all VMs of the snapshot for restore and
+delete. NAME uses lowercase letters, digits, ".", "_", and "-", with at most
+63 characters.
+
+Snapshots support file storage (qcow2 internal snapshots) and lvm-thin
+storage (read-only thin snapshot LVs). A VM with an lvm-thick disk cannot be
+in a snapshot.
+
+  create   Save the selected VMs. A stopped VM is saved directly. Running VMs
+           continue to run: if a VM has guest_agent: true, TopoLab first
+           freezes its file systems. Then all running VMs pause at the same
+           moment, TopoLab saves them, and they continue. The pause is short.
+           Output: a header and one line for each VM, with tab-separated
+           columns NAME, STATE (running or stopped) and CONSISTENCY:
+             frozen            the guest file systems were frozen (clean)
+             crash-consistent  the same state as after a power loss
+             stopped           the VM was stopped
+
+  restore  Bring the selected VMs back to the snapshot. TopoLab stops each
+           running VM with the stop --hard method, restores its disks and
+           OVMF variables, and starts it again. A VM that was stopped before
+           the restore stays stopped. If a disk grew after the snapshot, it
+           keeps its new size. If a restore is interrupted, run the same
+           command again to complete it.
+           Output: a header and one line for each VM, with tab-separated
+           columns NAME, BEFORE, RESULT and AFTER.
+
+  delete   Delete the snapshot, or only the parts of the selected VMs.
+
+  list     Show the snapshots. JSON output uses schema_version 1.
+
+topolab up refuses a change that destroys snapshot data: a template change,
+a VM removal, or a disk removal of a VM in a snapshot. Delete the snapshot,
+or the part of that VM, first. topolab down deletes all snapshots.
+
+A running exec or router exec command does not make a snapshot command wait.
 `
 
 // RuntimeCommand is the validated, normalized handoff to lifecycle packages.
@@ -113,6 +164,7 @@ func (c CLI) Execute(ctx context.Context, args []string) int {
 		fmt.Fprintln(c.Stderr, "       topolab exec [--user USER] [--cwd DIR] -- COMMAND...")
 		fmt.Fprintln(c.Stderr, "       topolab router exec NAME [--user USER] [--cwd DIR] -- COMMAND...")
 		fmt.Fprintln(c.Stderr, "       topolab stop [--hard] [NODE...]   (topolab stop --help for details)")
+		fmt.Fprintln(c.Stderr, "       topolab snapshot create|restore|delete NAME [NODE...] | list   (topolab snapshot --help for details)")
 		fmt.Fprintln(c.Stderr, "global options:")
 		fs.PrintDefaults()
 	}
@@ -133,6 +185,18 @@ func (c CLI) Execute(ctx context.Context, args []string) int {
 	if name == "stop" && slices.ContainsFunc(rest[1:], func(arg string) bool { return arg == "-h" || arg == "--help" }) {
 		fmt.Fprint(c.Stdout, stopHelp)
 		return 0
+	}
+	if name == "snapshot" {
+		if slices.ContainsFunc(rest[1:], func(arg string) bool { return arg == "-h" || arg == "--help" }) {
+			fmt.Fprint(c.Stdout, snapshotHelp)
+			return 0
+		}
+		if len(rest) < 2 || !snapshotSubcommands[rest[1]] {
+			fmt.Fprintln(c.Stderr, "topolab: snapshot requires the create, restore, delete, or list subcommand")
+			return 2
+		}
+		name = "snapshot-" + rest[1]
+		rest = append([]string{name}, rest[2:]...)
 	}
 	if name == "version" {
 		if len(rest) != 1 {

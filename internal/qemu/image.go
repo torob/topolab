@@ -18,10 +18,27 @@ import (
 const GiB = uint64(1) << 30
 
 type ImageInfo struct {
-	Format              string `json:"format"`
-	VirtualSize         uint64 `json:"virtual-size"`
-	BackingFilename     string `json:"backing-filename"`
-	FullBackingFilename string `json:"full-backing-filename"`
+	Format              string          `json:"format"`
+	VirtualSize         uint64          `json:"virtual-size"`
+	BackingFilename     string          `json:"backing-filename"`
+	FullBackingFilename string          `json:"full-backing-filename"`
+	Snapshots           []ImageSnapshot `json:"snapshots,omitempty"`
+}
+
+// ImageSnapshot is one internal snapshot of a qcow2 image.
+type ImageSnapshot struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// HasSnapshot reports whether the image has an internal snapshot with tag.
+func (i ImageInfo) HasSnapshot(tag string) bool {
+	for _, s := range i.Snapshots {
+		if s.Name == tag {
+			return true
+		}
+	}
+	return false
 }
 
 type ImageManager struct {
@@ -218,6 +235,36 @@ func (m *ImageManager) CreateCopy(ctx context.Context, destination string, templ
 // raw block devices, so CreateCopy, which writes a qcow2 file, does not use it.
 func (m *ImageManager) ConvertToRaw(ctx context.Context, source, destination string) error {
 	_, err := m.Runner.Run(ctx, m.QEMUImg, "convert", "-W", "-f", "qcow2", "-O", "raw", "-S", "4k", source, destination)
+	return err
+}
+
+// SnapshotCreate adds an internal snapshot with tag to a qcow2 image that no
+// process has open. The backing template opens read-only.
+func (m *ImageManager) SnapshotCreate(ctx context.Context, path, tag string) error {
+	if tag == "" {
+		return errors.New("snapshot tag is required")
+	}
+	_, err := m.Runner.Run(ctx, m.QEMUImg, "snapshot", "-c", tag, path)
+	return err
+}
+
+// SnapshotApply reverts a qcow2 image that no process has open to its internal
+// snapshot with tag. The image then also has the virtual size of the snapshot.
+func (m *ImageManager) SnapshotApply(ctx context.Context, path, tag string) error {
+	if tag == "" {
+		return errors.New("snapshot tag is required")
+	}
+	_, err := m.Runner.Run(ctx, m.QEMUImg, "snapshot", "-a", tag, path)
+	return err
+}
+
+// SnapshotDelete removes the internal snapshot with tag from a qcow2 image
+// that no process has open.
+func (m *ImageManager) SnapshotDelete(ctx context.Context, path, tag string) error {
+	if tag == "" {
+		return errors.New("snapshot tag is required")
+	}
+	_, err := m.Runner.Run(ctx, m.QEMUImg, "snapshot", "-d", tag, path)
 	return err
 }
 

@@ -92,6 +92,16 @@ type hardStopTarget struct {
 // SIGKILL. A process that does not exit within HardStopTimeout stays
 // running, keeps its PID in the manifest, and makes the command fail.
 func (a *App) hardStop(ctx context.Context, cfg *config.Config, layout state.Layout, m *state.Manifest, names []string) error {
+	targets, err := a.hardStopVMs(ctx, cfg, layout, m, names)
+	if targets != nil {
+		a.printHardStop(targets)
+	}
+	return err
+}
+
+// hardStopVMs does the work of stop --hard without output. It returns nil
+// targets when a check failed and no VM got a signal.
+func (a *App) hardStopVMs(ctx context.Context, cfg *config.Config, layout state.Layout, m *state.Manifest, names []string) ([]*hardStopTarget, error) {
 	targets := make([]*hardStopTarget, 0, len(names))
 	defer func() {
 		for _, t := range targets {
@@ -106,7 +116,7 @@ func (a *App) hardStop(ctx context.Context, cfg *config.Config, layout state.Lay
 		t := &hardStopTarget{name: name, node: m.Nodes[name], result: hardStopNotRunning}
 		targets = append(targets, t)
 		if err := a.prepareHardStop(cfg.Name, t); err != nil {
-			return fmt.Errorf("stop --hard: no VM was stopped: VM %s: %w", name, err)
+			return nil, fmt.Errorf("stop --hard: no VM was stopped: VM %s: %w", name, err)
 		}
 	}
 
@@ -167,8 +177,7 @@ func (a *App) hardStop(ctx context.Context, cfg *config.Config, layout state.Lay
 	if err := state.Save(layout.ManifestPath, m); err != nil {
 		errs = append(errs, err)
 	}
-	a.printHardStop(targets)
-	return errors.Join(errs...)
+	return targets, errors.Join(errs...)
 }
 
 // prepareHardStop opens an exit handle for a running VM and makes the same

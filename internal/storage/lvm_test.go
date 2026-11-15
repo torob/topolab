@@ -168,3 +168,23 @@ func containsPair(values []string, a, b string) bool {
 	}
 	return false
 }
+
+func TestSnapshotLVNameIsDeterministicAndDistinct(t *testing.T) {
+	name := SnapshotLVName("lab", "vm1", "root", "base")
+	if !strings.HasPrefix(name, "tlx-") || len(name) != 28 || !ValidName(name) {
+		t.Fatalf("SnapshotLVName = %q", name)
+	}
+	if name != SnapshotLVName("lab", "vm1", "root", "base") {
+		t.Fatal("SnapshotLVName is not deterministic")
+	}
+	for _, other := range []string{
+		SnapshotLVName("lab", "vm1", "root", "other"),
+		SnapshotLVName("lab", "vm1", "data", "base"),
+		SnapshotLVName("lab", "vm2", "root", "base"),
+		DiskName("lab", "vm1", "root"),
+	} {
+		if strings.TrimPrefix(other, "tlx-") == strings.TrimPrefix(name, "tlx-") {
+			t.Fatalf("name %q is not distinct from %q", other, name)
+		}
+	}
+}

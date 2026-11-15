@@ -17,6 +17,7 @@ The tool manages:
 - directional link latency, jitter, loss, and rate limits;
 - host-side link packet capture and directional counters;
 - read-only qcow2 templates with explicit file or LVM writable disks;
+- named topology snapshots of VM disks and OVMF variables;
 - persisted, multiplexed QEMU serial logs.
 
 The following features are outside the scope of this specification:
@@ -26,6 +27,7 @@ The following features are outside the scope of this specification:
 - physical NIC bridging;
 - QEMU live migration and live hardware reconfiguration other than online disk
   growth and VirtIO balloon-target changes;
+- snapshots of guest RAM or device state, and snapshots of `lvm-thick` disks;
 - libvirt integration;
 - a graphical interface; and
 - automatic restoration through systemd after host reboot.
@@ -134,7 +136,8 @@ executables and the standard OVMF paths from Section 2.
   supplied argv, without a shell, in its management-host network namespace.
   The command is permitted when that namespace has only loopback connectivity.
   A shared network lock is held for the command lifetime, so `up`, `stop`,
-  `restart`, and `down` wait; `start` and `stop --hard` do not wait (Section 7).
+  `restart`, and `down` wait; `start`, `stop --hard`, and the `snapshot`
+  commands do not wait (Section 7).
   A waiting lifecycle command writes `waiting for the topology lock` to stderr.
   The child inherits stdin, stdout, stderr, TTY state, and a sanitized process
   environment. `--cwd` selects its working directory.
@@ -188,10 +191,31 @@ executables and the standard OVMF paths from Section 2.
   `-` for no value. Times are UTC RFC 3339 with milliseconds and a `Z` suffix.
   `start` then boots the VMs with the same disks.
 
+`snapshot create NAME [NODE...]`, `snapshot restore NAME [NODE...]`, `snapshot delete NAME [NODE...]`, `snapshot list [--format table|json]`
+: Manage named topology snapshots as defined in Section 7.1. Without `NODE`,
+  `create` selects all VMs of the topology and `restore` and `delete` select
+  all VMs of the snapshot. `NAME` matches `^[a-z0-9][a-z0-9._-]{0,62}$` and is
+  unique in the topology. The commands require effective UID 0 and an
+  existing topology state; `list` is read-only. `snapshot --help` and
+  `snapshot SUBCOMMAND --help` print the help without loading the topology. A
+  missing or unknown subcommand is a usage error with exit status 2.
+
+  `create` prints a header and one tab-separated line for each selected VM in
+  selection order: `NAME`, `STATE` (`running` or `stopped`), and
+  `CONSISTENCY` (`frozen`, `crash-consistent`, or `stopped`). `restore` prints
+  a header and one line for each restored VM: `NAME`, `BEFORE` (`running` or
+  `stopped`), `RESULT` (`restored`), and `AFTER`. `delete` prints nothing.
+  Table output of `list` has the columns `NAME`, `STATE` (`ready` or
+  `pending`, with the incomplete operation in parentheses), `CREATED` (UTC RFC
+  3339 with milliseconds), `VMS`, and `CONSISTENCY` (a count for each value).
+  JSON output uses `schema_version: 1` and gives, for each snapshot, its name,
+  state, incomplete operation, creation time, incomplete restore, and for each
+  VM its run state at creation, consistency, incomplete operation, and disks.
+
 `down`
 : Stop QEMU VMs at the same time and helper processes, validate ownership, remove external
   root resources, router namespaces, the management-host namespace, and
-  finally the fabric namespace; then remove writable
+  finally the fabric namespace; then remove all snapshots, writable
   disks, NoCloud seeds, logs, and topology state. Template images are never
   removed. Packet-capture artifacts are also retained. Namespace removal is
   refused while unowned processes remain inside it. Running `down` when state
@@ -842,8 +866,8 @@ template LV per storage and template digest and are writable snapshots of it.
 Thin-pool chunk zeroing and full thick-LV wiping are disabled by default and
 are enabled only by `zero_new_blocks` and `wipe_on_create`, respectively.
 
-Pool, template-base, staging, and disk LV names are deterministic hashes and
-carry topology, storage, and kind ownership tags. Manifest version 3 records
+Pool, template-base, staging, disk, and snapshot LV names are deterministic
+hashes and carry topology, storage, and kind ownership tags. Manifest version 4 records
 VG, LV, and pool UUIDs plus checkpointed resource intent. A retry completes
 interrupted work. Deletion is refused if UUIDs, tags, pool membership, or
 unexpected resources do not match the manifest. Declared thin virtual capacity
@@ -1359,6 +1383,15 @@ network rendering. A VM using `root_ca_certificates` additionally requires the
 cloud-init CA certificates module and the guest OS trust-store tooling it
 invokes.
 
+A snapshot of a running VM uses the guest agent, QMP, and LVM as Section 7.1
+defines: `guest-fsfreeze-freeze` and `guest-fsfreeze-thaw` through the guest
+agent, QMP `stop` and `cont`, one QMP `transaction` of
+`blockdev-snapshot-internal-sync` actions for the qcow2 disks of a VM, and
+`blockdev-snapshot-delete-internal-sync` to delete an internal snapshot of a
+running VM. QMP `stop` completes the pending disk requests and flushes the
+disks before it returns. A stopped VM uses `qemu-img snapshot -c`, `-a`, and
+`-d` on images that no process has open.
+
 VM shutdown first requests `system_powerdown` over QMP, waits up to 30
 seconds, then uses bounded TERM and KILL fallbacks. `stop --hard` instead sends
 one SIGTERM through a pidfd to every selected QEMU process at the same moment,
@@ -1398,14 +1431,16 @@ A command always takes the network lock before the VM lock:
 | --- | --- | --- |
 | management-host and router `exec` | shared, for the full child lifetime | none |
 | `start`, `stop --hard` | shared | exclusive |
+| `snapshot create`, `snapshot restore`, `snapshot delete` | shared | exclusive |
 | `stop`, `restart`, `up`, `down` | exclusive | exclusive |
 
 So only one operation mutates VMs or writes the manifest at a time, and
-`start` and `stop --hard` run while `exec` commands run. A lifecycle command
+`start`, `stop --hard`, and the `snapshot` commands run while `exec` commands
+run. `snapshot list` takes no lock. A lifecycle command
 that has to wait for either lock writes `waiting for the topology lock` once to
 stderr.
 
-The version-2 manifest records a datapath version; deterministic fabric and management-
+The version-4 manifest records a datapath version; deterministic fabric and management-
 host namespace names and ownership aliases; namespace scope for every managed
 bridge, TAP, link, nftables table, counter, and ownership operation; distinct
 management-host, router, fabric, and root nftables state; and QEMU namespace
@@ -1417,15 +1452,19 @@ format, provisioning, observed capacity, VG/LV/pool UUIDs and ownership tags,
 storage pool utilization and warnings, restart-only hardware settings, requested balloon targets,
 TAP names, external-interface host peers, transit allocations, host routes,
 and NAT state, management-host interfaces and isolation rules, per-link
-datapath generation IDs and start times, process endpoints, and owned host
-resources.
+datapath generation IDs and start times, process endpoints, owned host
+resources, and the topology snapshots of Section 7.1. The tool reads a
+version-3 manifest, which has no snapshots, and writes it as version 4. A
+tool that does not support snapshots refuses a version-4 manifest.
 
 `up` follows these rules:
 
 1. Validate the file and all host prerequisites. Refuse an active legacy
    root-datapath manifest with an actionable instruction to run `down` first.
 2. Validate templates, every existing VM's bootstrap hash, and the complete
-   desired-versus-actual disk plan before any destructive change.
+   desired-versus-actual disk plan before any destructive change. Refuse a
+   change that destroys snapshot data (Section 7.1) and an incomplete
+   snapshot restore in its restore phase.
 3. Compute template, host-network, storage-identity, VM-bootstrap, and per-VM
    restart hashes.
 4. Allocate and checkpoint required staging or replacement storage, then stop VMs affected by a network rebuild, backing-template change, or
@@ -1481,7 +1520,9 @@ when the VM is running.
 
 An unchanged root disk and unchanged additional disks survive `stop`,
 `start`, `restart`, every network change, and host reboot. After reboot the
-operator reruns `up` to restore Linux networking and QEMU processes. A root
+operator reruns `up` to restore Linux networking and QEMU processes. A
+`snapshot restore` replaces the contents of the disks of the restored VMs; it
+does not delete their storage identity. A root
 disk is deleted only when its VM is removed, its template identity
 changes, or `down` is executed. An additional disk is deleted only
 when its name is explicitly removed from its VM, its VM is removed, or `down`
@@ -1491,6 +1532,93 @@ disk. Increasing a capacity never deletes a writable disk.
 If creation fails after partial host changes, the manifest records known
 partial state so a subsequent `up` can clean and retry it. Template validation
 and preflight failures occur before existing topology resources are replaced.
+
+### 7.1 Topology snapshots
+
+A snapshot is a named, persisted copy of the disks and the OVMF variables of
+selected VMs. It does not contain guest RAM or device state, so a restore
+boots the restored VMs again. One snapshot can contain running and stopped
+VMs. A VM with an `lvm-thick` disk cannot be in a snapshot.
+
+Each disk is saved by its backend:
+
+- a qcow2 `file` disk gets an internal qcow2 snapshot whose tag is the
+  snapshot name;
+- an `lvm-thin` disk gets a read-only thin snapshot LV named
+  `tlx-<hash of topology, node, disk, and snapshot>` with the ownership tags
+  of its storage and the kind `snapshot`.
+
+The OVMF variables copy of each VM is
+`<topology dir>/snapshots/<NAME>/<NODE>.OVMF_VARS.fd`. The manifest records,
+for each snapshot, its name, creation time, incomplete operation, and for
+each VM its storage-identity hash, run state at creation, consistency, the
+path and SHA-256 digest of its variables copy, and each disk's name,
+storage, type, format, capacity, and snapshot LV identity.
+
+`create` validates all selected VMs before any change: the name is unused,
+every disk is a qcow2 `file` disk or an `lvm-thin` disk with no incomplete
+work, no qcow2 disk already has an internal snapshot with that tag, no
+snapshot LV name exists, and every running QEMU process passes the ownership
+checks of `stop`. A failed check changes nothing. Then it records the
+snapshot as pending and:
+
+1. saves each stopped VM directly;
+2. for each running VM with `guest_agent: true` and a responsive agent,
+   freezes the guest file systems, with a timeout of 30 seconds; a VM without
+   a responsive agent or with a failed freeze gets a warning and a
+   crash-consistent snapshot;
+3. pauses all running VMs at the same moment with QMP `stop`;
+4. saves each paused VM: one QMP transaction for its qcow2 disks, and for each
+   thin disk an `fsync` of the LV device, because `cache: writeback` and
+   `cache: unsafe` can keep data in the host page cache, followed by
+   `lvcreate --snapshot`; then it copies the OVMF variables;
+5. resumes the paused VMs with QMP `cont` and thaws every VM that got a freeze
+   attempt, also after an error or a cancel; a VM that was not running before
+   the pause is not paused or resumed; and
+6. makes the snapshot LVs read-only and records their UUIDs and the variables
+   digests.
+
+If a step fails, `create` removes the parts that it made and the record. If
+that cleanup fails, the record stays pending and only `snapshot delete` can
+use it; that delete also resumes VMs that an interrupted create left paused
+and thaws their file systems. A thaw failure does not make the snapshot
+invalid, but the command reports it and exits with status 1.
+
+`restore` validates a new restore before any change: every selected VM is in
+the snapshot and in the topology file, its storage-identity hash, disk names,
+storages, storage types, and volume groups are unchanged, no disk is smaller
+than in the snapshot or has incomplete work, every internal snapshot and
+snapshot LV exists with its recorded identity, the variables copy has its
+recorded digest, and every running QEMU process passes the ownership checks.
+Then it records the restore with the selected VMs and the VMs that run, and:
+
+1. stops the selected running VMs with the `stop --hard` method;
+2. restores each VM: `qemu-img snapshot -a` for a qcow2 disk, followed by
+   offline growth to the recorded capacity when the disk grew after the
+   snapshot; for a thin disk it removes the disk LV, creates the staging LV as
+   a thin snapshot of the snapshot LV, grows it to the recorded capacity,
+   renames it to the disk LV name, and removes the staging tag; then it copies
+   the OVMF variables back; and
+3. starts the VMs that ran before the restore. A VM that was stopped before
+   the restore stays stopped.
+
+Each step checkpoints the manifest, so the same `snapshot restore NAME`
+completes an interrupted restore with the recorded VMs. Until the disks are
+restored, `up`, `start`, and `restart` refuse to run. `snapshot create`
+refuses to run while any restore is incomplete. If a VM does not start after its disks are restored, the
+restore record is cleared and the error names `topolab start`. A restored
+thin disk records the snapshot LV as its origin. The cloud-init instance ID
+does not change.
+
+`delete` removes the internal snapshots, through QMP for a running VM, the
+snapshot LVs, and the variables copies of the selected VMs, and the snapshot
+when no VM remains. A disk whose origin was a removed snapshot LV loses that
+origin. A delete is refused while the snapshot has an incomplete restore.
+
+`up` refuses, before any change, a template change, a VM removal, or an
+additional-disk removal of a VM in a snapshot, and names the `snapshot delete`
+command that removes that VM from the snapshot. Disk growth and new VMs or
+disks are allowed; a restore then refuses a VM whose disks changed.
 
 ## 8. Packet capture and counters
 
@@ -1622,7 +1750,9 @@ the operation to fail without deleting any recorded network resource.
 The implementation invokes external commands with argument arrays and never
 through a shell. Generated directories beneath `working_dir` are root-only.
 Cleanup verifies recorded ownership and never recursively deletes an
-unverified working directory or an unrecorded file. Before deleting a
+unverified working directory or an unrecorded file. A snapshot LV is removed
+only when its UUID, tags, and pool match the manifest, and a recorded
+snapshot path must be its deterministic path. Before deleting a
 namespace it stops all recorded QEMU and helper processes, lists remaining
 namespace PIDs, and refuses deletion when any unowned process remains.
 
@@ -1699,6 +1829,12 @@ implementation internals. At minimum it must verify:
 - `stop --hard` stops all selected VMs at the same moment without ACPI or
   KILL, keeps disk images consistent, leaves routers, namespaces, and running
   `exec` commands untouched, and lets `start` boot the same disks;
+- `snapshot create` saves running and stopped VMs with `file` and `lvm-thin`
+  disks, pauses the running VMs at the same moment, and lets them continue;
+  `snapshot restore` brings guest file contents back to the snapshot, keeps
+  the run state from before the restore, and completes after an
+  interruption; `up` refuses a change that destroys snapshot data; and
+  `down` removes every snapshot LV;
 - `up`, `ps`, `stop`, `start`, `restart`, and `down` satisfy their idempotency,
   persistence, and ownership contracts;
 - each router is realized in its own owned network namespace, with no QEMU
