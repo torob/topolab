@@ -147,3 +147,47 @@ func TestAcquireLockNotifyReportsContentionOnce(t *testing.T) {
 		t.Fatalf("callback ran %d times for an uncontended lock", free)
 	}
 }
+
+func TestAcquireSharedLockNotifyCoexistsAndWaitsForExclusiveHolder(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "topology.lock")
+	shared, err := AcquireSharedLock(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiting := 0
+	second, err := AcquireSharedLockNotify(context.Background(), path, func() { waiting++ })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if waiting != 0 {
+		t.Fatalf("callback ran %d times beside another shared holder", waiting)
+	}
+	if err := errors.Join(second.Close(), shared.Close()); err != nil {
+		t.Fatal(err)
+	}
+	exclusive, err := AcquireLock(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer exclusive.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Millisecond)
+	defer cancel()
+	_, err = AcquireSharedLockNotify(ctx, path, func() { waiting++ })
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want deadline exceeded", err)
+	}
+	if waiting != 1 {
+		t.Fatalf("callback ran %d times, want 1", waiting)
+	}
+}
+
+func TestLayoutSeparatesNetworkAndVMLocks(t *testing.T) {
+	// NewLayout does not create the directory.
+	layout, err := NewLayout("/tmp/tl-layout", "lab")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if layout.LockPath != filepath.Join(layout.LocksDir, "lab.lock") || layout.VMLockPath != filepath.Join(layout.LocksDir, "lab.vms.lock") {
+		t.Fatalf("lock paths = %q, %q", layout.LockPath, layout.VMLockPath)
+	}
+}

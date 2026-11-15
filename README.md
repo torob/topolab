@@ -82,14 +82,30 @@ firewall. Controller connectivity belongs under `management_host.interfaces`
 and is accessed with `topolab exec`.
 
 `exec [--user USER] [--cwd DIR] -- COMMAND...` executes argv directly in the
-management-host namespace and holds a shared topology lock. It preserves
+management-host namespace and holds the shared network lock. It preserves
 stdio/TTY behavior, forwards signals to the child process group, and returns
 the exact child status. The child runs as the original sudo caller by default,
 with supplementary groups and `HOME`/`USER`/`LOGNAME` reset; `--user` selects
 another local passwd entry. Root is retained only by the small supervisor that
-holds the lock and reaps the child. While `exec` runs, `up`, `start`, `stop`,
-`restart` and `down` wait for the lock and write `waiting for the topology lock`
-to stderr.
+holds the lock and reaps the child. While `exec` runs, `up`, `stop`, `restart`
+and `down` wait for the lock and write `waiting for the topology lock` to
+stderr. `start` and `stop --hard` change only VMs, so they do not wait for
+`exec` or `router exec`.
+
+TopoLab keeps two locks for each topology under `WORKING_DIR/.topolab/locks/`.
+The network lock (`<topology>.lock`) protects the namespaces, routers,
+switches, and the management host. The VM lock (`<topology>.vms.lock`)
+protects the QEMU processes and their state. A command takes the network lock
+first and the VM lock second:
+
+| Command | Network lock | VM lock |
+| --- | --- | --- |
+| `exec`, `router exec` | shared | - |
+| `start`, `stop --hard` | shared | exclusive |
+| `stop`, `restart`, `up`, `down` | exclusive | exclusive |
+
+So only one command changes VMs at a time, and `start` and `stop --hard` run
+while `exec` commands run. The normal `stop` keeps its exclusive network lock.
 
 `router exec NAME [--user USER] [--cwd DIR] -- COMMAND...` provides the same
 direct-exec, locking, stdio, TTY, signal, and exit-status behavior in a
@@ -135,6 +151,49 @@ vms:
         optional: true
         ipv4: {addresses: [10.0.0.10/24]}
 ```
+
+## Stop and power-loss tests
+
+`stop [NODE...]` and `stop --hard [NODE...]` stop the selected VMs, or all VMs
+when no node is given. Both keep the routers, switches, and namespaces
+running, and `start` boots the VMs again with the same disks. `ps` then shows
+the VMs as `stopped`. Run `topolab stop --help` for a summary.
+
+| | `stop` | `stop --hard` |
+| --- | --- | --- |
+| Guest | Gets an ACPI power-button event and shuts down | Loses power: no ACPI event, no guest shutdown |
+| Order | One VM after another | All VMs at the same moment |
+| QEMU | Up to 30 s for the guest, then SIGTERM, then SIGKILL | One SIGTERM, never SIGKILL |
+| Running `exec` | Makes the stop wait | Does not make the stop wait |
+
+`stop --hard` simulates a power loss of servers while the network stays up.
+It first checks every selected QEMU process, with the same ownership checks
+as `stop`: the PID must run in the topology's fabric namespace and must
+identify this topology and node. If a check fails, no VM stops. Then one loop
+sends SIGTERM through a pidfd to every selected QEMU process, so the time
+between the first and the last signal is a few microseconds and a reused PID
+never gets the signal. QEMU handles SIGTERM like the QMP command `quit`: it
+stops the vCPUs, writes its disk data to the host, closes the disks, and
+exits.
+
+If a QEMU process does not exit within 30 seconds, TopoLab leaves it running,
+keeps its PID in the state, prints the VM and the PID, and exits with status
+1. The command prints a header and one tab-separated line for each selected
+VM. Times are UTC with milliseconds; `STOP_TIME` is when TopoLab sent SIGTERM
+and `EXIT_TIME` is when QEMU exited:
+
+```text
+NAME	RESULT	PID	STOP_TIME	EXIT_TIME
+master-1	stopped	4242	2026-11-14T10:00:00.123Z	2026-11-14T10:00:00.161Z
+master-2	not-exited	4243	2026-11-14T10:00:00.123Z	-
+worker-1	not-running	-	-	-
+```
+
+Data note: like a real power loss, a hard stop loses the data that a guest did
+not flush. With `cache: unsafe`, a hard stop keeps the disk images consistent,
+because QEMU writes its disk data to the host before it exits. A host crash or
+a host power loss can still lose data and break an image, because that data
+can still be only in the host page cache.
 
 ## Explicit storage backends
 
@@ -183,8 +242,9 @@ matters more than durability, for example etcd on lab masters. It uses
 buffered host I/O like `writeback` and also makes QEMU ignore guest flush
 requests, like QEMU `cache=unsafe`: a guest flush completes at once and the
 data stays in the host page cache. A host crash or power loss can lose writes
-that the guest saw as flushed and can corrupt the disk image. TopoLab never
-selects `unsafe` on its own; set it on each disk that needs it.
+that the guest saw as flushed and can corrupt the disk image. A `stop --hard`
+does not (see [Stop and power-loss tests](#stop-and-power-loss-tests)).
+TopoLab never selects `unsafe` on its own; set it on each disk that needs it.
 
 Changing a disk's cache policy restarts only its VM and preserves the disk.
 On upgrade, existing configurations without `cache` intentionally switch to
@@ -246,7 +306,16 @@ sudo python3 e2e/routed/test.py
 sudo python3 e2e/services/test.py
 sudo python3 e2e/vm-features/test.py
 sudo python3 e2e/storage/test.py
+sudo python3 e2e/power-loss/test.py
 ```
+
+The power-loss suite runs 3 VMs with `cache: unsafe` disks. After
+`stop --hard`, it checks each qcow2 image with `qemu-img check`. It also checks
+each ext4 and vfat filesystem on each guest disk in a copy: the copy gets the
+same recovery as the next boot (ext4 journal replay, FAT dirty bit), then
+`e2fsck -fn` or `fsck.fat -n` must find no error. After `start`, the guest
+kernels must report no filesystem error. Set `TOPOLAB_E2E_POWER_LOSS_MEMORY_MB`
+to change the memory of each VM (default 1024).
 
 The VM suites automatically download the official Ubuntu 26.04 amd64 cloud
 image from pinned release `20260720`, verify its SHA-256, and cache it under

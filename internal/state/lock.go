@@ -34,6 +34,12 @@ func AcquireSharedLock(ctx context.Context, path string) (*Lock, error) {
 	return acquireLock(ctx, path, syscall.LOCK_SH, nil)
 }
 
+// AcquireSharedLockNotify is AcquireSharedLock that calls waiting once, before
+// it polls again, when an exclusive holder owns the lock.
+func AcquireSharedLockNotify(ctx context.Context, path string, waiting func()) (*Lock, error) {
+	return acquireLock(ctx, path, syscall.LOCK_SH, waiting)
+}
+
 func acquireLock(ctx context.Context, path string, mode int, waiting func()) (*Lock, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err

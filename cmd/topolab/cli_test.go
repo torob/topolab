@@ -149,3 +149,61 @@ func TestCLIPropagatesExactChildExitCode(t *testing.T) {
 		t.Fatalf("exit code = %d, want 42", code)
 	}
 }
+
+func TestCLIStopHelpNeedsNoTopologyOrRoot(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing.yml")
+	for _, args := range [][]string{{"stop", "--help"}, {"stop", "--hard", "vm1", "-h"}} {
+		var out, stderr bytes.Buffer
+		cli := CLI{Stdout: &out, Stderr: &stderr, EUID: func() int { return 1000 }}
+		if code := cli.Execute(context.Background(), append([]string{"--file", missing}, args...)); code != 0 {
+			t.Fatalf("%q: exit %d, stderr=%s", args, code, stderr.String())
+		}
+		help := strings.Join(strings.Fields(out.String()), " ")
+		for _, fragment := range []string{
+			"stop [--hard] [NODE...]",
+			"ACPI power-button event",
+			"one after another",
+			"--hard Simulate a power loss",
+			"at the same moment",
+			"TopoLab never sends SIGKILL",
+			"within 30 seconds",
+			"exits with status 1",
+			"NAME, RESULT",
+			"STOP_TIME",
+			"EXIT_TIME",
+			"does not make stop --hard wait",
+			"With cache: unsafe, a hard stop keeps the disk images consistent",
+			"host crash",
+		} {
+			if !strings.Contains(help, fragment) {
+				t.Errorf("%q: stop help omits %q:\n%s", args, fragment, out.String())
+			}
+		}
+	}
+}
+
+func TestCLIUsageShowsStopSyntax(t *testing.T) {
+	var stderr bytes.Buffer
+	if code := (CLI{Stdout: &bytes.Buffer{}, Stderr: &stderr}).Execute(context.Background(), nil); code != 2 {
+		t.Fatalf("exit %d", code)
+	}
+	if !strings.Contains(stderr.String(), "topolab stop [--hard] [NODE...]") {
+		t.Fatalf("usage omits the stop syntax:\n%s", stderr.String())
+	}
+}
+
+func TestCLIPassesStopHardArgumentsUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "topology.yml")
+	if err := os.WriteFile(file, []byte("name: x\nrouters: [{name: r, interfaces: [{name: e, external: {sources: [10.0.0.0/24]}}]}]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runtime := &recordingRuntime{}
+	cli := CLI{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}, EUID: func() int { return 0 }, Runtime: runtime}
+	if code := cli.Execute(context.Background(), []string{"--file", file, "--working-dir", filepath.Join(dir, "work"), "stop", "--hard", "vm1"}); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	if runtime.command.Name != "stop" || strings.Join(runtime.command.Args, "|") != "--hard|vm1" {
+		t.Fatalf("runtime command = %#v", runtime.command)
+	}
+}

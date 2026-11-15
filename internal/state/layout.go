@@ -25,7 +25,8 @@ type Layout struct {
 	LocksDir     string
 	CaptureDir   string
 	ManifestPath string
-	LockPath     string
+	LockPath     string // network lock: namespaces, routers, switches, management host
+	VMLockPath   string // VM lock: QEMU processes and VM state; taken after LockPath
 	NodesDir     string
 	LogsDir      string
 	SocketsDir   string
@@ -59,6 +60,7 @@ func NewLayout(workingDir, topology string) (Layout, error) {
 		ManifestPath: filepath.Join(topologyDir, "manifest.json"),
 		LocksDir:     filepath.Join(stateRoot, "locks"),
 		LockPath:     filepath.Join(stateRoot, "locks", topology+".lock"),
+		VMLockPath:   filepath.Join(stateRoot, "locks", topology+".vms.lock"),
 		NodesDir:     filepath.Join(topologyDir, "nodes"),
 		LogsDir:      filepath.Join(topologyDir, "logs"),
 		SocketsDir:   filepath.Join(topologyDir, "sockets"),

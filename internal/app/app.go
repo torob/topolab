@@ -91,6 +91,11 @@ type App struct {
 	ZeroBlockDevice func(string, uint64) error
 	OVMFCode        string
 	OVMFVars        string
+	// Pidfds opens the exit handles that stop --hard signals and waits on.
+	Pidfds qemu.PidfdOps
+	// HardStopTimeout is how long stop --hard waits for a QEMU process to
+	// exit after SIGTERM.
+	HardStopTimeout time.Duration
 	// Sleep waits for d and returns early with the context error on cancel.
 	// It runs the VM start_delay wait.
 	Sleep         func(context.Context, time.Duration) error
@@ -167,6 +172,12 @@ func (a *App) defaults() {
 	}
 	if a.Processes == nil {
 		a.Processes = qemu.OSProcessOps{}
+	}
+	if a.Pidfds == nil {
+		a.Pidfds = qemu.OSPidfdOps{}
+	}
+	if a.HardStopTimeout <= 0 {
+		a.HardStopTimeout = HardStopTimeout
 	}
 	if a.Preflight == nil {
 		a.Preflight = preflight.Runtime
@@ -255,6 +266,13 @@ func (a *App) Run(ctx context.Context, command Command) error {
 		}
 		return a.runRouterExec(ctx, command.Topology, layout, m, command.Args)
 	case "up", "start", "stop", "restart", "down":
+		hard, args := false, command.Args
+		if command.Name == "stop" {
+			var err error
+			if hard, args, err = splitStopArgs(command.Args); err != nil {
+				return err
+			}
+		}
 		// A missing down is genuinely read-only and idempotent. Start/stop also
 		// report absence without manufacturing an empty topology directory.
 		if command.Name != "up" {
@@ -277,11 +295,11 @@ func (a *App) Run(ctx context.Context, command Command) error {
 		if err := layout.Ensure(); err != nil {
 			return err
 		}
-		lock, err := state.AcquireLockNotify(ctx, layout.LockPath, func() { fmt.Fprintln(a.Stderr, LockWaitNotice) })
+		unlock, err := a.acquireLifecycleLocks(ctx, layout, command.Name == "start" || hard)
 		if err != nil {
 			return err
 		}
-		defer lock.Close()
+		defer unlock()
 		m, err := state.Load(layout.ManifestPath)
 		if err != nil {
 			return err
@@ -306,9 +324,9 @@ func (a *App) Run(ctx context.Context, command Command) error {
 		case "up":
 			return a.up(ctx, command.Topology, layout, m)
 		case "start":
-			return a.start(ctx, command.Topology, layout, m, command.Args)
+			return a.start(ctx, command.Topology, layout, m, args)
 		case "stop":
-			return a.stop(ctx, command.Topology, layout, m, command.Args)
+			return a.stop(ctx, command.Topology, layout, m, hard, args)
 		case "restart":
 			return a.restart(ctx, command.Topology, layout, m, command.Args)
 		case "down":
@@ -905,13 +923,16 @@ func (a *App) start(ctx context.Context, cfg *config.Config, layout state.Layout
 	return nil
 }
 
-func (a *App) stop(ctx context.Context, cfg *config.Config, layout state.Layout, m *state.Manifest, args []string) error {
+func (a *App) stop(ctx context.Context, cfg *config.Config, layout state.Layout, m *state.Manifest, hard bool, args []string) error {
 	if m == nil {
 		return errors.New("topology is not up")
 	}
 	names, err := selectNodes(cfg, args)
 	if err != nil {
 		return err
+	}
+	if hard {
+		return a.hardStop(ctx, cfg, layout, m, names)
 	}
 	for _, name := range names {
 		stopErr := a.stopNode(ctx, cfg.Name, name, m.Nodes[name])
@@ -1005,19 +1026,35 @@ func (a *App) stopNode(ctx context.Context, topology, name string, n *state.Node
 		return nil
 	}
 	if n.PID > 0 && a.Processes.Alive(n.PID) {
-		if n.NetworkNamespace != "" {
-			same, err := a.Namespaces.SameProcess(n.PID, n.NetworkNamespace)
-			if err != nil {
-				return fmt.Errorf("verify QEMU PID %d namespace: %w", n.PID, err)
-			}
-			if !same {
-				return fmt.Errorf("QEMU PID %d is outside expected fabric namespace %s", n.PID, n.NetworkNamespace)
-			}
+		if err := a.verifyNodeNamespace(n); err != nil {
+			return err
 		}
 		if err := a.Stopper.Stop(ctx, n.PID, topology, name, n.QMPPath); err != nil {
 			return err
 		}
 	}
+	return a.finishNodeStop(n)
+}
+
+// verifyNodeNamespace checks that the recorded QEMU PID runs in the node's
+// recorded fabric namespace.
+func (a *App) verifyNodeNamespace(n *state.Node) error {
+	if n.NetworkNamespace == "" {
+		return nil
+	}
+	same, err := a.Namespaces.SameProcess(n.PID, n.NetworkNamespace)
+	if err != nil {
+		return fmt.Errorf("verify QEMU PID %d namespace: %w", n.PID, err)
+	}
+	if !same {
+		return fmt.Errorf("QEMU PID %d is outside expected fabric namespace %s", n.PID, n.NetworkNamespace)
+	}
+	return nil
+}
+
+// finishNodeStop records that the node's QEMU process ended: it clears the
+// PID, stops the serial collector and removes the runtime files.
+func (a *App) finishNodeStop(n *state.Node) error {
 	n.PID, n.Process = 0, nil
 	if n.CollectorProcess != nil && n.CollectorProcess.PID > 0 {
 		if err := stopHelper(a.Processes, n.CollectorProcess); err != nil {

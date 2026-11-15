@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/torob/topolab/internal/app"
@@ -19,6 +20,38 @@ var commandNames = map[string]bool{
 	"restart": true, "down": true,
 	"exec": true, "router": true, "version": true,
 }
+
+// stopHelp is the output of `topolab stop --help`.
+const stopHelp = `usage: topolab [GLOBAL OPTIONS] stop [--hard] [NODE...]
+
+Stop the selected VMs, or all VMs when no NODE is given. Routers, switches,
+and namespaces keep running. "topolab start" starts the VMs again with the
+same disks.
+
+Without --hard, TopoLab stops the VMs one after another. Each VM gets an ACPI
+power-button event and has up to 30 seconds to shut down. Then TopoLab sends
+SIGTERM and, at the end, SIGKILL. A running exec or router exec command makes
+the stop wait.
+
+  --hard  Simulate a power loss of the selected VMs. TopoLab sends SIGTERM to
+          all of their QEMU processes in one loop, so all VMs stop at the same
+          moment. The guests get no ACPI event and do not shut down. QEMU
+          writes its disk data to the host before it exits, so the disk images
+          stay consistent, also with cache: unsafe. TopoLab never sends
+          SIGKILL. If a QEMU process does not exit within 30 seconds, TopoLab
+          prints the VM and its PID, leaves the process running, and exits
+          with status 1. A running exec or router exec command does not make
+          stop --hard wait.
+
+          Output: a header and one line for each VM, with tab-separated
+          columns NAME, RESULT (stopped, not-exited or not-running), PID,
+          STOP_TIME (when TopoLab sent SIGTERM) and EXIT_TIME (when QEMU
+          exited). Times are UTC with milliseconds.
+
+Data note: like a real power loss, a hard stop loses the data that a guest did
+not flush. With cache: unsafe, a hard stop keeps the disk images consistent,
+but a host crash or a host power loss can still lose data and break an image.
+`
 
 // RuntimeCommand is the validated, normalized handoff to lifecycle packages.
 type RuntimeCommand struct {
@@ -79,6 +112,7 @@ func (c CLI) Execute(ctx context.Context, args []string) int {
 		fmt.Fprintln(c.Stderr, "usage: topolab [GLOBAL OPTIONS] COMMAND [OPTIONS]")
 		fmt.Fprintln(c.Stderr, "       topolab exec [--user USER] [--cwd DIR] -- COMMAND...")
 		fmt.Fprintln(c.Stderr, "       topolab router exec NAME [--user USER] [--cwd DIR] -- COMMAND...")
+		fmt.Fprintln(c.Stderr, "       topolab stop [--hard] [NODE...]   (topolab stop --help for details)")
 		fmt.Fprintln(c.Stderr, "global options:")
 		fs.PrintDefaults()
 	}
@@ -95,6 +129,10 @@ func (c CLI) Execute(ctx context.Context, args []string) int {
 		fmt.Fprintf(c.Stderr, "topolab: unknown command %q\n", name)
 		fs.Usage()
 		return 2
+	}
+	if name == "stop" && slices.ContainsFunc(rest[1:], func(arg string) bool { return arg == "-h" || arg == "--help" }) {
+		fmt.Fprint(c.Stdout, stopHelp)
+		return 0
 	}
 	if name == "version" {
 		if len(rest) != 1 {

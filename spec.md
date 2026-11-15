@@ -133,8 +133,9 @@ executables and the standard OVMF paths from Section 2.
 : Require an active, ownership-validated topology and directly execute the
   supplied argv, without a shell, in its management-host network namespace.
   The command is permitted when that namespace has only loopback connectivity.
-  A shared topology lock is held for the command lifetime, so `down` waits;
-  a waiting lifecycle command writes `waiting for the topology lock` to stderr.
+  A shared network lock is held for the command lifetime, so `up`, `stop`,
+  `restart`, and `down` wait; `start` and `stop --hard` do not wait (Section 7).
+  A waiting lifecycle command writes `waiting for the topology lock` to stderr.
   The child inherits stdin, stdout, stderr, TTY state, and a sanitized process
   environment. `--cwd` selects its working directory.
 
@@ -160,12 +161,32 @@ executables and the standard OVMF paths from Section 2.
   `--user` selects a local passwd-database account and drops to its primary and
   supplementary groups.
 
-`start [NODE ...]`, `stop [NODE ...]`, `restart [NODE ...]`
+`start [NODE ...]`, `stop [--hard] [NODE ...]`, `restart [NODE ...]`
 : Operate on selected QEMU VMs, or all QEMU VMs when no names are supplied.
   These commands do not stop routers or remove networking. `stop`
   leaves the fabric and management-host namespaces present. `start` reuses and
   verifies both namespaces and is rejected if the managed network is absent or
-  fails ownership validation.
+  fails ownership validation. `--hard` may appear once, in any position, and
+  `stop --help` prints the stop help without loading the topology.
+
+`stop --hard [NODE ...]`
+: Simulate a simultaneous power loss of the selected VMs while routers,
+  switches, namespaces, and their processes keep running. The guests get no
+  ACPI event. Before any signal, every selected running QEMU process passes the
+  ownership checks of `stop` (fabric namespace and command-line identity)
+  through a pidfd that was opened before the checks; one failure rejects the
+  command and no VM stops. Then a single loop sends SIGTERM through each pidfd,
+  so QEMU exits through its normal shutdown path, which writes its disk data to
+  the host and closes the disks before exit. The tool never sends SIGKILL. It
+  waits up to 30 seconds after its SIGTERM for each process to exit. A VM that
+  exited, or was not running, gets the same state as after `stop`. A process
+  that did not exit stays running and keeps its PID in the manifest, and the
+  command reports the VM and the PID and exits with status 1. Standard output
+  is a header and one tab-separated line for each selected VM, in selection
+  order: `NAME`, `RESULT` (`stopped`, `not-exited`, or `not-running`), `PID`,
+  `STOP_TIME` (when SIGTERM was sent), and `EXIT_TIME` (when QEMU exited), with
+  `-` for no value. Times are UTC RFC 3339 with milliseconds and a `Z` suffix.
+  `start` then boots the VMs with the same disks.
 
 `down`
 : Stop QEMU VMs at the same time and helper processes, validate ownership, remove external
@@ -867,7 +888,7 @@ waits on its own delay. The first VM that a command launches never waits,
 because no earlier launch exists to space it from; its `start_delay` has no
 effect in that command. A VM that is already running is not launched, so it
 does not wait and does not count as that first launch. `restart` stops a VM
-before its wait, so the VM stays stopped during the wait. The wait holds the topology lock, and cancellation ends it at
+before its wait, so the VM stays stopped during the wait. The wait holds the command's topology locks (Section 7), and cancellation ends it at
 once without starting the VM. `start_delay` changes no VM hardware, so it
 needs no restart and preserves every writable disk.
 
@@ -1339,7 +1360,10 @@ cloud-init CA certificates module and the guest OS trust-store tooling it
 invokes.
 
 VM shutdown first requests `system_powerdown` over QMP, waits up to 30
-seconds, then uses bounded TERM and KILL fallbacks. Before signaling, the tool
+seconds, then uses bounded TERM and KILL fallbacks. `stop --hard` instead sends
+one SIGTERM through a pidfd to every selected QEMU process at the same moment,
+never sends `system_powerdown` or KILL, and leaves a process that does not
+exit within 30 seconds running. Before signaling, the tool
 verifies that the PID command line identifies the expected topology and node.
 `down` stops all VMs at the same time. It waits until each stop ends and
 records the stopped VMs in the state. Then it fails if a stop failed.
@@ -1352,6 +1376,8 @@ All persistent and volatile state is stored beneath the resolved
 ```text
 <working_dir>/.topolab/topologies/<name>/
 <working_dir>/.topolab/shared/
+<working_dir>/.topolab/locks/<name>.lock
+<working_dir>/.topolab/locks/<name>.vms.lock
 <working_dir>/captures/<name>/
 ```
 
@@ -1363,10 +1389,21 @@ does not read it and `down` does not remove it. User-managed content elsewhere
 beneath `working_dir`, including `templates/`, is not topology state. No
 runtime file is created under a fixed `/var/lib` or `/run` location.
 
-Only one operation may mutate a topology at a time; mutations take an
-exclusive file lock. Both management-host and router `exec` hold a shared lock
-for the full child lifetime. A lifecycle command that has to wait for the lock
-writes `waiting for the topology lock` once to stderr.
+Each topology has two file locks. The network lock (`<name>.lock`) protects
+namespaces, routers, switches, and the management host. The VM lock
+(`<name>.vms.lock`) protects QEMU processes and the VM entries of the manifest.
+A command always takes the network lock before the VM lock:
+
+| Command | Network lock | VM lock |
+| --- | --- | --- |
+| management-host and router `exec` | shared, for the full child lifetime | none |
+| `start`, `stop --hard` | shared | exclusive |
+| `stop`, `restart`, `up`, `down` | exclusive | exclusive |
+
+So only one operation mutates VMs or writes the manifest at a time, and
+`start` and `stop --hard` run while `exec` commands run. A lifecycle command
+that has to wait for either lock writes `waiting for the topology lock` once to
+stderr.
 
 The version-2 manifest records a datapath version; deterministic fabric and management-
 host namespace names and ownership aliases; namespace scope for every managed
@@ -1659,6 +1696,9 @@ implementation internals. At minimum it must verify:
   runtime mutation;
 - unknown fields, unsafe paths, missing variables, invalid ownership, and all
   documented cross-field violations are rejected before mutation;
+- `stop --hard` stops all selected VMs at the same moment without ACPI or
+  KILL, keeps disk images consistent, leaves routers, namespaces, and running
+  `exec` commands untouched, and lets `start` boot the same disks;
 - `up`, `ps`, `stop`, `start`, `restart`, and `down` satisfy their idempotency,
   persistence, and ownership contracts;
 - each router is realized in its own owned network namespace, with no QEMU
